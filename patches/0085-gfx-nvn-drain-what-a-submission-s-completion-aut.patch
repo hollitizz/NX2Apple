@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hollitizz <valentin.caure@epitech.eu>
+Date: Wed, 25 Nov 2026 15:27:37 +0100
+Subject: [PATCH] gfx/nvn: drain what a submission's completion autoreleases
+
+post_complete also runs on a game thread waiting in SyncWait (post_early), whose implicit
+autorelease pool never drains, so every render-pass readback buffer it landed (mirror_rb_land)
+stayed alive after leaving the residency set: Tears of the Kingdom on an Apple TV kept 2,480
+of them, 1,005 MB, within 100 s, until tvOS ended it at its memory limit. Its own pool frees
+them when the completion ends. Ported from TVPort.
+
+Upstream-Status: fork-only
+Reason: readback buffers leaked on a game thread push an Apple TV past its memory limit, found by TVPort
+Issue: LNPANDY/NX2Apple#85
+
+---
+ dm/gfx/nvn/nvn_mtl.m | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index e383324..3e26daa 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -3169,7 +3169,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
+ }
+ // Both GPU feedback and an early waiter complete records in submission order.
+ // Delayed callbacks carry their fence, never the identity of a recyclable slot.
+-static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
++static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) { @autoreleasepool {
+     uint64_t now = guest_ns();
+     for (uint64_t f = g_done + 1; f <= fence; f++) {
+         post_rec *r = &g_postr[f % POST_RING];
+@@ -3185,7 +3185,7 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
+     uint32_t *scr = atomic_load(&g_mesh_scr); if (scr) __atomic_store_n(scr + DMSH_MESH_SCRATCH_DONE, (uint32_t)g_done, __ATOMIC_RELAXED);   // the slices of groups this fence cut off are free again
+     pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
+     nvn_queue_gpu_progress();
+-}
++} }
+ static uint64_t g_sub_ready;   // mtl_sub_ready, for the submission being encoded
+ static int g_sub_drain = -1;
+ void mtl_sub_ready(uint64_t t) { g_sub_ready = t; }

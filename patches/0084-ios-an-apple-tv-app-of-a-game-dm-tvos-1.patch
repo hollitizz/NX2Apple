@@ -1,0 +1,705 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hollitizz <valentin.caure@epitech.eu>
+Date: Wed, 25 Nov 2026 15:27:30 +0100
+Subject: [PATCH] ios: an Apple TV app of a game (DM_TVOS=1)
+
+build_ipa.sh with DM_TVOS=1 builds the game as a tvOS app, unsigned IPA or prepared Xcode project:
+project_tv.yml, the frameworks the appletvos SDK has (gen_build.py DM_SDK), a layered icon and Top
+Shelf images made from the game's icon (tools/tv_icon.swift), stage_resources.sh accepting
+appletvos. The shader libraries stay the iOS ones, which tvOS loads, so the shader chain is the same.
+On tvOS:
+- the game files, saves and logs live in Library/Caches (main.m): tvOS apps cannot write Documents;
+- a controller's presses reach the game only (DmRootVC is a GCEventViewController), and a Back press
+  stays in the game instead of leaving for the Home screen; UIKit gets the controller while a user
+  or keyboard alert is up;
+- the saves are copied into the app's preferences a few seconds after each save, as the cloud-save
+  path does (SourcesTV/TVSaves.m, LZFSE), and come back when the system purged Library/Caches;
+  a store past 900 KB goes to Library/Preferences/tv-saves;
+- there is no settings screen and no in-game menu (SourcesTV/TVFront.m).
+The save goes out when the app resigns active, not only in the background: a swipe in the app
+switcher ends it with no background step. Ported from TVPort.
+
+Upstream-Status: fork-only
+Reason: Apple TV builds of a game (DM_TVOS=1), ported from TVPort: a fork product choice
+Issue: LNPANDY/NX2Apple#85
+
+---
+ dm/ios/Sources/front_ios.m           |  37 ++++++-
+ dm/ios/Sources/main.m                |  17 ++--
+ dm/ios/SourcesTV/TVFront.m           |   5 +
+ dm/ios/SourcesTV/TVSaves.m           | 103 +++++++++++++++++++
+ dm/ios/project_tv.yml                |  83 ++++++++++++++++
+ dm/ios/tests/test_framework_build.py |   2 +-
+ dm/ios/tools/build_ipa.sh            |  25 +++--
+ dm/ios/tools/gen_build.py            |   7 +-
+ dm/ios/tools/stage_resources.sh      |   2 +-
+ dm/ios/tools/tv_icon.swift           | 142 +++++++++++++++++++++++++++
+ 10 files changed, 404 insertions(+), 19 deletions(-)
+ create mode 100644 dm/ios/SourcesTV/TVFront.m
+ create mode 100644 dm/ios/SourcesTV/TVSaves.m
+ create mode 100644 dm/ios/project_tv.yml
+ create mode 100644 dm/ios/tools/tv_icon.swift
+
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index 77b80a1..3f11e99 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -99,7 +99,11 @@ @interface DmTVSceneDelegate : UIResponder <UIWindowSceneDelegate>
+ @property (strong, nonatomic) UIWindow *window;
+ @end
+ 
++#if TARGET_OS_TV
++@interface DmRootVC : GCEventViewController
++#else
+ @interface DmRootVC : UIViewController
++#endif
+ @property (nonatomic, strong) DmGameView *game;
+ @property (nonatomic, strong) UIView *pad;
+ @property (nonatomic, strong) UILabel *fps;
+@@ -112,6 +116,9 @@ @interface DmRootVC : UIViewController
+ #if __has_include(<UIKit/UIHingeInteraction.h>)
+ - (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1));
+ #endif
++#if TARGET_OS_TV
++@property (nonatomic, strong) UITapGestureRecognizer *backPress;
++#endif
+ @property (nonatomic) BOOL hasLauncher;   // the app has a settings screen: a failed Play goes back to it (its Game data section is the way out)
+ - (void)startGame;
+ - (void)showFPS:(BOOL)on;
+@@ -129,6 +136,9 @@ - (void)showHint:(NSString *)text {   // why the game cannot start, centered ove
+ }
+ - (void)viewDidLoad {
+     [super viewDidLoad];
++#if TARGET_OS_TV
++    self.controllerUserInteractionEnabled = NO;
++#endif
+     self.view.backgroundColor = UIColor.blackColor;
+ #if __has_include(<UIKit/UIHingeInteraction.h>)
+     if (@available(iOS 27.1, *)) {
+@@ -256,6 +266,9 @@ - (void)showFPS:(BOOL)on {   // the frame-rate counter: DM_SHOW_FPS at Play, the
+ }
+ - (void)viewDidAppear:(BOOL)a {
+     [super viewDidAppear:a];
++#if TARGET_OS_TV
++    [self keepBackPressInGame];
++#endif
+     if (!front_ios_boot_ok() && front_ios_boot_message() && !self.presentedViewController) {   // a slim build whose game file image is missing or another version (main.m)
+         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Game files" message:@(front_ios_boot_message()) preferredStyle:UIAlertControllerStyleAlert];
+         [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+@@ -267,6 +280,17 @@ - (void)viewDidAppear:(BOOL)a {
+     if (!self.hasLauncher) [self startGame];   // the settings screen first (Launcher.swift), when the app has one
+     front_ios_notify_ask();
+ }
++#if TARGET_OS_TV
++- (BOOL)canBecomeFirstResponder { return YES; }
++- (void)keepBackPressInGame {
++    [self becomeFirstResponder];
++    if (self.backPress) return;
++    self.backPress = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(backPressed:)];
++    self.backPress.allowedPressTypes = @[@(UIPressTypeMenu)];
++    [self.view.window addGestureRecognizer:self.backPress];
++}
++- (void)backPressed:(UITapGestureRecognizer *)g { (void)g; LOG("front end: a Back press stayed in the game"); }
++#endif
+ - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+ - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
+ - (BOOL)prefersStatusBarHidden { return YES; }
+@@ -589,6 +613,13 @@ static void handoff_notice(NSString *text) {   // the game is ending: no sound,
+ 
+ // The account applet offers only choices allowed by the host. Native actions keep
+ // the choice with the player, including creation, skip and cancellation.
++static void controller_drives_ui(BOOL on) {
++#if TARGET_OS_TV
++    dispatch_async(dispatch_get_main_queue(), ^{ g_root.controllerUserInteractionEnabled = on; });
++#else
++    (void)on;
++#endif
++}
+ int front_user_select(const front_user *users, int count, int allow_create, int allow_skip) {
+     if (!g_layer) return FRONT_USER_CANCEL;
+     __block int result = FRONT_USER_CANCEL;
+@@ -619,7 +650,9 @@ int front_user_select(const front_user *users, int count, int allow_create, int
+         dm_gamepad_reset();
+         [vc presentViewController:alert animated:YES completion:nil];
+     });
++    controller_drives_ui(YES);
+     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
++    controller_drives_ui(NO);
+     return result;
+ }
+ 
+@@ -643,7 +676,9 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
+     });
+     // The guest clock keeps running meanwhile, as on the Switch (hle_swkbd.c): a freeze here as well stopped Octopath Traveler 0's frame loop for as long as the box was up and made its sound stutter
+     // (4,977 ms and 2,577 ms frames, 5,181 wakeups a second). The inline keyboard freezes around its own call (hle_swkbd.c)
++    controller_drives_ui(YES);
+     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
++    controller_drives_ui(NO);
+     if (!r) return 0;
+     snprintf(out, out_cap, "%s", text.UTF8String ? text.UTF8String : "");
+     return 1;
+@@ -762,7 +797,7 @@ static void save_sync_background(void) {
+ void front_ios_focus_event(int ev) {
+     if (ev != 4 && (!g_layer || atomic_load(&g_quitting))) return;
+     switch (ev) {
+-        case 0: quit_close(); dm_movie_active(0); dm_gamepad_reset(); dm_focus_set(2); break;
++        case 0: quit_close(); dm_movie_active(0); dm_gamepad_reset(); dm_focus_set(2); save_sync_background(); break;
+         case 1:
+             UIApplication.sharedApplication.idleTimerDisabled = NO;
+             dm_focus_set(3);
+diff --git a/dm/ios/Sources/main.m b/dm/ios/Sources/main.m
+index d4c7a8b..cea7425 100644
+--- a/dm/ios/Sources/main.m
++++ b/dm/ios/Sources/main.m
+@@ -15,6 +15,11 @@
+ #include "DataBookmark.h"
+ #include "romfs_identity.h"
+ #include "player_env.h"
++#if TARGET_OS_TV
++#define DM_DATA_DIRECTORY NSCachesDirectory
++#else
++#define DM_DATA_DIRECTORY NSDocumentDirectory
++#endif
+ #ifndef DM_PLAYER_BUILD
+ #define DM_PLAYER_BUILD 0
+ #endif
+@@ -82,7 +87,7 @@ static BOOL romfs_dir_ok(NSString *d) {
+ // The layout exists so several games can share one installed app and so the game data can sit on
+ // an external drive the Files app exposes (a folder copied there keeps this shape).
+ static NSString *game_dir_for(const char *title_id) {
+-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
++    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0];
+     return [[doc stringByAppendingPathComponent:@"games"] stringByAppendingPathComponent:@(title_id)];
+ }
+ 
+@@ -101,7 +106,7 @@ static BOOL romfs_dir_ok(NSString *d) {
+ static NSString *g_prog;   // a game of several programs: the running program's folder in the app (p<N>, program_env); nil otherwise
+ static NSString *romfs_locate(NSString *prog) {   // prog: a game of several programs, the running program's folder in the app (p<N>); nil otherwise
+     NSFileManager *fm = NSFileManager.defaultManager;
+-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
++    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0];
+     if (prog) {   // the program's files are in the app (Documents holds one image, one program's)
+         NSString *p = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:prog], *img = [p stringByAppendingPathComponent:@"romfs.img"], *d = [p stringByAppendingPathComponent:@"romfs"];
+         if (romfs_image_complete(img)) return img;
+@@ -164,7 +169,7 @@ static BOOL romfs_dir_ok(NSString *d) {
+ static int set_data_env(NSString *romfs, BOOL force) {
+     if (!romfs) return 0;
+     NSFileManager *fm = NSFileManager.defaultManager;
+-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
++    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0];
+     fprintf(stderr, "boot: game files %s\n", romfs.fileSystemRepresentation);
+     setenv("DM_ROMFS", romfs.fileSystemRepresentation, force);
+     // The RomFS of the application's other programs (scripts/pack_nup.py, a Switch 2 Edition's Switch 1 program), which the game mounts by program index (hle_fs.c): in the app beside its
+@@ -198,7 +203,7 @@ static int set_data_env(NSString *romfs, BOOL force) {
+ static void aoc_locate(void) {
+     if (getenv("DM_AOC_DIR")) return;
+     NSFileManager *fm = NSFileManager.defaultManager;
+-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
++    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0];
+     for (NSString *d in @[[doc stringByAppendingPathComponent:@"aoc"], [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"aoc"]]) {
+         BOOL dir = NO;
+         if (![fm fileExistsAtPath:d isDirectory:&dir] || !dir) continue;
+@@ -231,7 +236,7 @@ static void romfs_identity_report(NSString *doc) {
+ static NSString *program_env(NSString **msl_out);
+ static int boot_env(void) {
+     NSFileManager *fm = NSFileManager.defaultManager;
+-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
++    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0];
+     NSString *res = NSBundle.mainBundle.resourcePath;
+     for (NSString *d in @[@"save", @"temp"]) [fm createDirectoryAtPath:[doc stringByAppendingPathComponent:d] withIntermediateDirectories:YES attributes:nil error:nil];
+     // Keep game files and scratch data out of device backups (Documents is backed up by default; a RomFS placed there is many GB). Saves, logs and the pipeline list stay in the backup
+@@ -349,7 +354,7 @@ static int boot_env(void) {
+ // Started from the record, the settings screen stays away (DM_LAUNCHER=0): the player is on the way into a game. Returns the program's dm folder (the host's modules folder), nil when its game files are missing
+ static NSString *program_env(NSString **msl_out) {
+     NSFileManager *fm = NSFileManager.defaultManager;
+-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0], *res = NSBundle.mainBundle.resourcePath;
++    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0], *res = NSBundle.mainBundle.resourcePath;
+     NSString *dmdir = [res stringByAppendingPathComponent:@"dm"], *msl = [res stringByAppendingPathComponent:@"msl"], *prog = nil;
+     NSString *plist = [NSString stringWithContentsOfFile:[dmdir stringByAppendingPathComponent:@"programs.txt"] encoding:NSUTF8StringEncoding error:nil];
+     if (plist) {
+diff --git a/dm/ios/SourcesTV/TVFront.m b/dm/ios/SourcesTV/TVFront.m
+new file mode 100644
+index 0000000..a86ded6
+--- /dev/null
++++ b/dm/ios/SourcesTV/TVFront.m
+@@ -0,0 +1,5 @@
++#include <stdbool.h>
++#include <stddef.h>
++
++bool dm_show_launcher(void *view_controller, void (*done)(void)) { (void)view_controller; (void)done; return false; }
++void *dm_game_menu(void) { return NULL; }
+diff --git a/dm/ios/SourcesTV/TVSaves.m b/dm/ios/SourcesTV/TVSaves.m
+new file mode 100644
+index 0000000..710b5de
+--- /dev/null
++++ b/dm/ios/SourcesTV/TVSaves.m
+@@ -0,0 +1,103 @@
++#import <Foundation/Foundation.h>
++#include <compression.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include "save_sync.h"
++
++#define STORE_LIMIT (900 * 1024)
++#define HEADER 12
++static NSString *const PREFIX = @"dmsave:";
++static const char MAGIC[4] = {'D', 'M', 'Z', '2'};
++
++static NSString *caches_directory(void) {
++    return NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
++}
++
++static NSString *store_key(const char *cloud) {
++    NSString *path = @(cloud);
++    NSRange at = [path rangeOfString:@"/tv-saves/"];
++    return [PREFIX stringByAppendingString:at.location == NSNotFound ? path.lastPathComponent : [path substringFromIndex:NSMaxRange(at)]];
++}
++
++static NSString *spill_path(NSString *key) {
++    NSString *name = [[key substringFromIndex:PREFIX.length] stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
++    NSString *library = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES).firstObject;
++    return [[library stringByAppendingPathComponent:@"Preferences/tv-saves"] stringByAppendingPathComponent:name];
++}
++
++static NSUInteger stored_size_except(NSUserDefaults *defaults, NSString *key) {
++    NSUInteger total = 0;
++    NSDictionary *all = defaults.dictionaryRepresentation;
++    for (NSString *k in all) if ([k hasPrefix:PREFIX] && ![k isEqualToString:key]) total += [all[k] length];
++    return total;
++}
++
++static NSData *pack_save(NSData *raw) {
++    size_t room = raw.length + raw.length / 8 + 65536;
++    NSMutableData *packed = [NSMutableData dataWithLength:HEADER + room];
++    memcpy(packed.mutableBytes, MAGIC, 4);
++    uint64_t size = raw.length; memcpy((uint8_t *)packed.mutableBytes + 4, &size, 8);
++    size_t n = compression_encode_buffer((uint8_t *)packed.mutableBytes + HEADER, room, raw.bytes, raw.length, NULL, COMPRESSION_LZFSE);
++    if (!n) return nil;
++    packed.length = HEADER + n;
++    return packed;
++}
++
++static NSData *unpack_save(NSData *packed) {
++    if (packed.length <= HEADER || memcmp(packed.bytes, MAGIC, 4)) return nil;
++    uint64_t size = 0; memcpy(&size, (const uint8_t *)packed.bytes + 4, 8);
++    NSMutableData *raw = [NSMutableData dataWithLength:size];
++    if (!raw) return nil;
++    size_t n = compression_decode_buffer(raw.mutableBytes, size, (const uint8_t *)packed.bytes + HEADER, packed.length - HEADER, NULL, COMPRESSION_LZFSE);
++    return n == size ? raw : nil;
++}
++
++static int store_in_file(NSData *packed, NSString *key, NSUserDefaults *defaults) {
++    NSString *spill = spill_path(key);
++    [NSFileManager.defaultManager createDirectoryAtPath:spill.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
++    if (![packed writeToFile:spill atomically:YES]) { fprintf(stderr, "[dm] [RED] tv saves: writing %s failed\n", spill.fileSystemRepresentation); return 0; }
++    [defaults removeObjectForKey:key]; [defaults synchronize];
++    fprintf(stderr, "[dm] tv saves: %zu packed bytes kept in Library/Preferences, past the preferences' budget\n", (size_t)packed.length);
++    return 1;
++}
++
++static int store_in_defaults(NSData *packed, NSString *key, NSUserDefaults *defaults) {
++    [defaults setObject:packed forKey:key];
++    if (![defaults synchronize]) { fprintf(stderr, "[dm] [RED] tv saves: the preferences did not take the save\n"); return 0; }
++    [NSFileManager.defaultManager removeItemAtPath:spill_path(key) error:nil];
++    fprintf(stderr, "[dm] tv saves: %zu packed bytes kept in the preferences\n", (size_t)packed.length);
++    return 1;
++}
++
++int front_save_sync_store(const char *local, const char *cloud) {
++    @autoreleasepool {
++        NSData *raw = [NSData dataWithContentsOfFile:@(local)];
++        if (!raw.length) { fprintf(stderr, "[dm] [RED] tv saves: cannot read %s\n", local); return 0; }
++        NSData *packed = pack_save(raw);
++        if (!packed) { fprintf(stderr, "[dm] [RED] tv saves: a %zu-byte save did not compress\n", (size_t)raw.length); return 0; }
++        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
++        NSString *key = store_key(cloud);
++        if (stored_size_except(defaults, key) + packed.length > STORE_LIMIT) return store_in_file(packed, key, defaults);
++        return store_in_defaults(packed, key, defaults);
++    }
++}
++
++int front_save_sync_fetch(const char *cloud, const char *local) {
++    @autoreleasepool {
++        NSString *key = store_key(cloud);
++        NSData *packed = [NSUserDefaults.standardUserDefaults dataForKey:key] ?: [NSData dataWithContentsOfFile:spill_path(key)];
++        if (!packed) return 0;
++        NSData *raw = unpack_save(packed);
++        if (!raw) { fprintf(stderr, "[dm] [RED] tv saves: the stored save %s is damaged\n", key.UTF8String); return -1; }
++        if (![raw writeToFile:@(local) atomically:YES]) { fprintf(stderr, "[dm] [RED] tv saves: writing %s failed\n", local); return -1; }
++        return 1;
++    }
++}
++
++void dm_cloud_saves_env(void) {
++    if (getenv("DM_SAVE_SYNC")) return;
++    const char *save = getenv("DM_SAVE");
++    NSString *folder = save ? @(save).lastPathComponent : @"save";
++    setenv("DM_SAVE_SYNC", [caches_directory() stringByAppendingFormat:@"/tv-saves/%@", folder].fileSystemRepresentation, 1);
++}
+diff --git a/dm/ios/project_tv.yml b/dm/ios/project_tv.yml
+new file mode 100644
+index 0000000..87cb9ac
+--- /dev/null
++++ b/dm/ios/project_tv.yml
+@@ -0,0 +1,83 @@
++# Apple TV project (xcodegen), chosen by build_ipa.sh with DM_TVOS=1. The shader libraries stay the iOS ones, which tvOS loads, so the shader chain is the same.
++# No settings screen, no in-game menu and no iCloud: SourcesTV/TVFront.m stands in for Launcher.swift and GameMenu.swift, SourcesTV/TVSaves.m keeps the saves in the app's preferences.
++name: DmIOS
++options:
++  bundleIdPrefix: ${DM_BUNDLE_ID}
++  deploymentTarget:
++    tvOS: "26.0"
++configFiles:
++  Release: Gen/dm.xcconfig
++  Debug: Gen/dm.xcconfig
++targets:
++  DmIOS:
++    type: application
++    platform: tvOS
++    sources:
++      - path: Sources
++        excludes: [Info.plist, "*.swift", DmIOS-Bridging-Header.h, CloudSaves.m, SaveSync.m]
++      - path: SourcesTV
++      - path: Gen/embed.S
++      - path: Gen/dm
++        type: folder
++        buildPhase: resources
++      - path: Gen/Assets.xcassets
++      - path: Gen/src
++      - path: Gen/main/main.c
++        compilerFlags: "-Dmain=dm_main"
++    dependencies:
++      - sdk: libcompression.tbd
++    postBuildScripts:
++      - name: Copy game resources
++        script: /bin/bash "${SRCROOT}/tools/stage_resources.sh"
++        basedOnDependencyAnalysis: false
++    info:
++      path: Gen/Info.plist
++      properties:
++        CFBundleDisplayName: ${DM_DISPLAY_NAME}
++        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
++        CFBundleShortVersionString: $(MARKETING_VERSION)
++        LSApplicationCategoryType: ${DM_APP_CATEGORY}
++        DMShowFPS: ${DM_SHOW_FPS}
++        DMLanguage: ${DM_LANG}
++        DMForkPatches: ${DM_FORK_PATCHES}
++        GCSupportsControllerUserInteraction: true
++        GCSupportedGameControllers:
++          - ProfileName: ExtendedGamepad
++        UIApplicationSceneManifest:
++          UIApplicationSupportsMultipleScenes: false
++          UISceneConfigurations:
++            UIWindowSceneSessionRoleApplication:
++              - UISceneConfigurationName: Default
++                UISceneDelegateClassName: SceneDelegate
++    settings:
++      PRODUCT_BUNDLE_IDENTIFIER: ${DM_BUNDLE_ID}
++      PRODUCT_NAME: DmIOS
++      MARKETING_VERSION: ${DM_APP_VERSION}
++      CURRENT_PROJECT_VERSION: ${DM_APP_VERSION}
++      DEVELOPMENT_TEAM: ${DM_TEAM_ID}
++      CODE_SIGN_STYLE: Automatic
++      ENABLE_USER_SCRIPT_SANDBOXING: NO
++      DM_COPY_GAME_RESOURCES: YES
++      SYMROOT: $(DM_XCODE_OUTPUT_ROOT)/Build/Products
++      OBJROOT: $(DM_XCODE_OUTPUT_ROOT)/Build/Intermediates.noindex
++      CONFIGURATION_BUILD_DIR: $(DM_XCODE_OUTPUT_ROOT)/Build/Products/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)
++      CONFIGURATION_TEMP_DIR: $(DM_XCODE_OUTPUT_ROOT)/Build/Intermediates.noindex/$(PROJECT_NAME).build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)
++      ASSETCATALOG_COMPILER_APPICON_NAME: $(DM_APPICON)
++      TARGETED_DEVICE_FAMILY: "3"
++      ENABLE_BITCODE: NO
++      GCC_C_LANGUAGE_STANDARD: gnu11
++      OTHER_CFLAGS: $(inherited) -mcpu=apple-m1
++      CLANG_ENABLE_OBJC_ARC: YES
++      DEBUG_INFORMATION_FORMAT: dwarf
++      GCC_WARN_INHIBIT_ALL_WARNINGS: YES
++schemes:
++  ${DM_SCHEME_NAME}:
++    build:
++      targets:
++        DmIOS: all
++    run:
++      config: Release
++    profile:
++      config: Release
++    archive:
++      config: Release
+diff --git a/dm/ios/tests/test_framework_build.py b/dm/ios/tests/test_framework_build.py
+index 8c0640f..eb4d87c 100644
+--- a/dm/ios/tests/test_framework_build.py
++++ b/dm/ios/tests/test_framework_build.py
+@@ -37,7 +37,7 @@ PACKING = SCRIPT[SCRIPT.index('\nP=Payload/DmIOS.app\n'):]
+ PREPARE = SCRIPT[SCRIPT.index('if [ "$PREPARE_XCODE" = YES ]; then'):SCRIPT.index('\nelse DM_SCHEME_NAME=DmIOS; fi')] + '\nfi\n'
+ # DM_FRAMEWORK_ONLY's block, after the helper it finds the shader libraries with
+ FRAMEWORK_ONLY = (next(line for line in SCRIPT.splitlines() if line.startswith('lib_path() ')) + '\n' +
+-                  SCRIPT[SCRIPT.index('# DM_FRAMEWORK_ONLY: the framework target alone'):SCRIPT.index('\nt "xcodebuild (Release, unsigned, iPhone + iPad)"')] + '\n')
++                  SCRIPT[SCRIPT.index('# DM_FRAMEWORK_ONLY: the framework target alone'):SCRIPT.index('\nt "xcodebuild (Release, unsigned, $XCODE_DEVICES)"')] + '\n')
+ PREAMBLE = 'set -u\nt() { :; }; die() { echo "$*" >&2; exit 1; }\ngp() { python3 "$PROFILE_TOOL" "$GAME" "$1"; }\n'
+ CAN_SIGN = sys.platform == 'darwin' and shutil.which('codesign') and shutil.which('cc')
+ 
+diff --git a/dm/ios/tools/build_ipa.sh b/dm/ios/tools/build_ipa.sh
+index 87884e4..4b0e331 100755
+--- a/dm/ios/tools/build_ipa.sh
++++ b/dm/ios/tools/build_ipa.sh
+@@ -20,6 +20,7 @@
+ #   CONTROL=<control.nacp> is the file whose languages the launcher's settings offer (the NSP script's languages_control; default: the packed game's control data as above);
+ #   DM_METAL_CAPTURE=1 makes a development build that can write GPU frame captures (MetalCaptureEnabled in Info.plist, for the host's DM_GPU_CAPTURE switch);
+ #   DM_PYTHON=<path> selects Python for build_ipa.sh and its helper tools (default: python3 on PATH; FONT_PY overrides it for make_shared_fonts.py);
++#   DM_TVOS=1 builds the Apple TV app instead (project_tv.yml, the frameworks of the appletvos SDK, a layered icon from tools/tv_icon.swift); the shader libraries stay the iOS ones. Not with DM_FRAMEWORK
+ #   DM_SHOW_FPS=1 turns the frame-rate counter on (DMShowFPS in Info.plist; DM_SHOW_FPS in the app's Documents/env.txt overrides it on the phone);
+ #   DM_LANG=<language code> is the game language (DMLanguage in Info.plist, default en-US; DM_LANG in the app's Documents/env.txt overrides it on the phone);
+ #   both are also the launcher's defaults (dm/launcher.json from dm/games/settings.py; the player's choice there wins over them, Documents/env.txt over the choice);
+@@ -49,6 +50,9 @@ if [ -z "${ROMFS:-}" ] && [ -f "$W/data/$PKG/RomFS.img" ]; then ROMFS=$W/data/$P
+ PATCHED=${PATCHED:-$W/build/patched_$PKG}; ROMFS=${ROMFS:-$W/data/$PKG/RomFS}; MSL_IOS=${MSL_IOS:-$W/build/ios/dmsh_b}; AOC=${AOC-$W/data/aoc}
+ PREPARE_XCODE=NO; [ "${1:-}" != --prepare-xcode ] || PREPARE_XCODE=YES
+ FRAMEWORK=${DM_FRAMEWORK:-0}   # 1: the game's modules live in DmGame.framework (route C); 0: in the executable, as always
++[ "${DM_TVOS:-0}" != 1 ] || [ "$FRAMEWORK" != 1 ] || die "DM_TVOS=1 builds the Apple TV app, which has no game framework (DM_FRAMEWORK)"
++if [ "${DM_TVOS:-0}" = 1 ]; then export DM_SDK=appletvos; XCODE_DESTINATION='generic/platform=tvOS'; XCODE_PLATFORM=appletvos; XCODE_DEVICES='Apple TV'
++else XCODE_DESTINATION='generic/platform=iOS'; XCODE_PLATFORM=iphoneos; XCODE_DEVICES='iPhone + iPad'; fi
+ # Route C's shell (DM_FRAMEWORK_ONLY=<folder>): only this game's framework, self-contained, for build_shell.sh to embed (no app, no IPA)
+ FRAMEWORK_ONLY=${DM_FRAMEWORK_ONLY:-}; FW_NAME=${DM_FRAMEWORK_NAME:-DmGame}
+ if [ -n "$FRAMEWORK_ONLY" ]; then
+@@ -86,9 +90,10 @@ if [ "$PREPARE_XCODE" = YES ]; then
+   [ "$IOS" != "$IOS_SOURCE" ] || die "the per-game Xcode project must be outside dm/ios"
+   # Source links follow repository edits; generated files and build products belong to this game only. Linked again each time: a project prepared from another checkout (a removed worktree) follows this one
+   for item in Sources tools; do ln -sfn "$IOS_SOURCE/$item" "$IOS/$item" || die "link $item"; done
++  [ "${DM_TVOS:-0}" != 1 ] || ln -sfn "$IOS_SOURCE/SourcesTV" "$IOS/SourcesTV" || die "link SourcesTV"
+   # Route C: the framework target's marker source lives in dm/ios/framework, and the template is project-framework.yml
+   [ "${FRAMEWORK:-0}" != 1 ] || ln -sfn "$IOS_SOURCE/framework" "$IOS/framework" || die "link framework"
+-  PROJECT_TEMPLATE=project.yml; [ "${FRAMEWORK:-0}" != 1 ] || PROJECT_TEMPLATE=project-framework.yml
++  PROJECT_TEMPLATE=project.yml; [ "${FRAMEWORK:-0}" != 1 ] || PROJECT_TEMPLATE=project-framework.yml; [ "${DM_TVOS:-0}" != 1 ] || PROJECT_TEMPLATE=project_tv.yml
+   cp "$IOS_SOURCE/$PROJECT_TEMPLATE" "$IOS/project.yml" || die "copy project template"
+   cd "$IOS" || die "cd $IOS"
+   DM_SCHEME_NAME="$(echo "$DM_DISPLAY_NAME" | tr '/:' '__') ($GAME)"   # the scheme file is named after it
+@@ -251,7 +256,11 @@ mkdir -p Gen/dm/font && "${FONT_PY:-${DM_PYTHON:-python3}}" "$DM/tools/make_shar
+ # The catalog is always created (the project always lists it, see project.yml); without an icon it stays empty and DM_APPICON is not set
+ ICON=${DM_ICON:-$(dirname "$ROMFS")/icon.jpg}
+ mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
+-if [ -f "$ICON" ]; then
++if [ -f "$ICON" ] && [ "${DM_TVOS:-0}" = 1 ]; then
++  xcrun swift "$IOS_SOURCE/tools/tv_icon.swift" "$ICON" Gen/Assets.xcassets || die "tv_icon.swift: cannot make the Apple TV icon from $ICON"
++  echo "DM_APPICON = AppIcon" >> Gen/dm.xcconfig
++  t "Apple TV icon and top shelf images: $ICON"
++elif [ -f "$ICON" ]; then
+   AI=Gen/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"
+   sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null || die "sips: cannot convert the icon $ICON"
+   printf '{"images":[{"filename":"icon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}\n' > "$AI/Contents.json"
+@@ -340,8 +349,10 @@ if [ "$PREPARE_XCODE" = YES ] && [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
+ fi
+ # The framework project is named explicitly. Everything else runs xcodegen exactly as before: a prepared project has its
+ # template copied in as project.yml, and the in-place build uses dm/ios/project.yml (the default template is never edited)
+-if [ "$PREPARE_XCODE" = YES ] || [ "$FRAMEWORK" != 1 ]; then xcodegen generate -q > /dev/null || die "xcodegen"
+-else xcodegen generate -q --spec project-framework.yml > /dev/null || die "xcodegen"; fi
++SPEC=
++if [ "$PREPARE_XCODE" != YES ] && [ "${DM_TVOS:-0}" = 1 ]; then SPEC=project_tv.yml
++elif [ "$PREPARE_XCODE" != YES ] && [ "$FRAMEWORK" = 1 ]; then SPEC=project-framework.yml; fi
++xcodegen generate -q ${SPEC:+--spec "$SPEC"} > /dev/null || die "xcodegen"
+ # DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c)
+ COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null)" ] || COMMIT=$COMMIT+dirty
+   /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"; t "source: $COMMIT"; }
+@@ -484,14 +495,14 @@ EOF
+   exit 0
+ fi
+ 
+-t "xcodebuild (Release, unsigned, iPhone + iPad)"
++t "xcodebuild (Release, unsigned, $XCODE_DEVICES)"
+ mkdir -p "$O"
+-xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
++xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destination "$XCODE_DESTINATION" -derivedDataPath "$DD" \
+   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DM_COPY_GAME_RESOURCES=NO \
+   DM_XCODE_OUTPUT_ROOT="$DD" SYMROOT="$DD/Build/Products" OBJROOT="$DD/Build/Intermediates.noindex" build > "$O/build.log" 2>&1 \
+   || { grep -E 'error:' "$O/build.log" | head -20; die "xcodebuild, log $O/build.log"; }
+ # SYMROOT and OBJROOT above keep the unsigned build separate from the interactive Xcode app.
+-APP=$DD/Build/Products/Release-iphoneos/DmIOS.app
++APP=$DD/Build/Products/Release-$XCODE_PLATFORM/DmIOS.app
+ [ -n "$APP" ] && [ -d "$APP" ] || die "no built app"; t "app: $APP"
+ 
+ # Straight from the sources: the app without its signature, and without the folders an app built before pack_ipa.py still has (DerivedData keeps resources that left the project;
+diff --git a/dm/ios/tools/gen_build.py b/dm/ios/tools/gen_build.py
+index d6e38bf..f698e6d 100644
+--- a/dm/ios/tools/gen_build.py
++++ b/dm/ios/tools/gen_build.py
+@@ -4,7 +4,7 @@
+ #   stdout            xcconfig lines: HEADER_SEARCH_PATHS (-I directories + the directory of every source file, so relative includes resolve as usual),
+ #                     OTHER_CFLAGS (-D), frameworks (only those the iOS SDK has: a Mac-only one, such as Cocoa, which the UIKit side replaces, or IOBluetooth,
+ #                     which only Mac code under TARGET_OS_OSX uses, would fail the link; each one left out is named on stderr)
+-# Usage: gen_build.py <dm/host dir> <Gen dir>
++# Usage: gen_build.py <dm/host dir> <Gen dir>; DM_SDK=appletvos takes the frameworks the Apple TV SDK has (default iphoneos)
+ import os, shlex, subprocess, sys
+ host, gen = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+ # Generate the game profile header and the host's shaders compiled for iOS (MSL_SDK=iphoneos: gen/msl-iphoneos, dm/gfx/tools/host_msl.py) for real first (make -n below only prints;
+@@ -43,8 +43,9 @@ for s in srcs:
+     os.symlink(s, f'{gen}/src/{flat}')
+ print('HEADER_SEARCH_PATHS = $(inherited) ' + ' '.join(f'"{d}"' for d in incs + dirs))
+ print('OTHER_CFLAGS = $(inherited) ' + ' '.join(defs))
+-sdk = subprocess.run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], capture_output=True, text=True, check=True).stdout.strip()
++sdk_name = os.environ.get('DM_SDK', 'iphoneos')
++sdk = subprocess.run(['xcrun', '--sdk', sdk_name, '--show-sdk-path'], capture_output=True, text=True, check=True).stdout.strip()
+ fws = list(dict.fromkeys(fws))
+ mac_only = [f for f in fws if not os.path.isdir(f'{sdk}/System/Library/Frameworks/{f}.framework')]
+-if mac_only: print('gen_build: not in the iOS SDK, left out of the link: ' + ' '.join(mac_only), file=sys.stderr)
++if mac_only: print(f'gen_build: not in the {sdk_name} SDK, left out of the link: ' + ' '.join(mac_only), file=sys.stderr)
+ print('DM_FRAMEWORKS = ' + ' '.join(f'-framework {f}' for f in fws if f not in mac_only))
+diff --git a/dm/ios/tools/stage_resources.sh b/dm/ios/tools/stage_resources.sh
+index b773c9c..60e29d6 100644
+--- a/dm/ios/tools/stage_resources.sh
++++ b/dm/ios/tools/stage_resources.sh
+@@ -4,7 +4,7 @@
+ set -eu
+ [ "${DM_COPY_GAME_RESOURCES:-YES}" != NO ] || exit 0
+ die() { echo "[RED] $*" >&2; exit 1; }
+-[ "${PLATFORM_NAME:-}" = iphoneos ] || die 'This game needs a physical iPhone or iPad; choose a device, not a simulator.'
++case "${PLATFORM_NAME:-}" in iphoneos | appletvos) ;; *) die 'This game needs a physical iPhone, iPad or Apple TV; choose a device, not a simulator.' ;; esac
+ [ -f "${SRCROOT:?}/Gen/resources.env" ] || die 'Missing game resource paths; run build_ipa_from_nsp.py --prepare-xcode first.'
+ source "$SRCROOT/Gen/resources.env"
+ APP="${TARGET_BUILD_DIR:?}/${UNLOCALIZED_RESOURCES_FOLDER_PATH:?}"
+diff --git a/dm/ios/tools/tv_icon.swift b/dm/ios/tools/tv_icon.swift
+new file mode 100644
+index 0000000..31799ad
+--- /dev/null
++++ b/dm/ios/tools/tv_icon.swift
+@@ -0,0 +1,142 @@
++import AppKit
++import CoreImage
++
++let wideEnough = 1.4
++
++func fail(_ message: String) -> Never { FileHandle.standardError.write(Data("tv_icon: \(message)\n".utf8)); exit(1) }
++
++func loadImage(_ path: String) -> CGImage {
++    guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
++          let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldAllowFloat: false] as CFDictionary) else { fail("cannot read the image \(path)") }
++    return image
++}
++
++func bitmap(_ w: Int, _ h: Int) -> CGContext {
++    guard let c = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
++                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { fail("cannot make a \(w)x\(h) bitmap") }
++    c.interpolationQuality = .high
++    return c
++}
++
++func fillRect(_ art: CGImage, _ w: Int, _ h: Int) -> CGRect {
++    let s = max(Double(w) / Double(art.width), Double(h) / Double(art.height))
++    let dw = Double(art.width) * s, dh = Double(art.height) * s
++    return CGRect(x: (Double(w) - dw) / 2, y: (Double(h) - dh) / 2, width: dw, height: dh)
++}
++
++func fitRect(_ art: CGImage, _ w: Int, _ h: Int, inset: Double) -> CGRect {
++    let s = min(Double(w) * inset / Double(art.width), Double(h) * inset / Double(art.height))
++    let dw = Double(art.width) * s, dh = Double(art.height) * s
++    return CGRect(x: (Double(w) - dw) / 2, y: (Double(h) - dh) / 2, width: dw, height: dh)
++}
++
++func blurred(_ art: CGImage, _ w: Int, _ h: Int) -> CGImage {
++    let c = bitmap(w, h)
++    c.draw(art, in: fillRect(art, w, h))
++    let input = CIImage(cgImage: c.makeImage()!).clampedToExtent()
++    let blur = CIFilter(name: "CIGaussianBlur", parameters: [kCIInputImageKey: input, kCIInputRadiusKey: Double(h) * 0.06])!
++    let extent = CGRect(x: 0, y: 0, width: w, height: h)
++    return CIContext().createCGImage(blur.outputImage!.cropped(to: extent), from: extent)!
++}
++
++func wide(_ art: CGImage) -> Bool { Double(art.width) / Double(art.height) >= wideEnough }
++
++func backLayer(_ art: CGImage, _ w: Int, _ h: Int) -> CGImage {
++    let c = bitmap(w, h)
++    c.setFillColor(CGColor(srgbRed: 0.05, green: 0.05, blue: 0.07, alpha: 1))
++    c.fill(CGRect(x: 0, y: 0, width: w, height: h))
++    if wide(art) { c.draw(art, in: fillRect(art, w, h)) } else {
++        c.draw(blurred(art, w, h), in: CGRect(x: 0, y: 0, width: w, height: h))
++        c.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.35))
++        c.fill(CGRect(x: 0, y: 0, width: w, height: h))
++    }
++    return c.makeImage()!
++}
++
++func frontLayer(_ art: CGImage, _ w: Int, _ h: Int) -> CGImage {
++    let c = bitmap(w, h)
++    if wide(art) {
++        let colors = [CGColor(gray: 1, alpha: 1), CGColor(gray: 1, alpha: 1), CGColor(gray: 1, alpha: 0)] as CFArray
++        let fade = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.genericGrayGamma2_2), colors: colors, locations: [0, 0.55, 1])!
++        c.saveGState()
++        let mask = bitmap(w, h)
++        mask.drawRadialGradient(fade, startCenter: CGPoint(x: w / 2, y: h / 2), startRadius: 0, endCenter: CGPoint(x: w / 2, y: h / 2), endRadius: Double(max(w, h)) * 0.55, options: [])
++        c.clip(to: CGRect(x: 0, y: 0, width: w, height: h), mask: mask.makeImage()!)
++        c.draw(art, in: fillRect(art, w, h))
++        c.restoreGState()
++    } else {
++        let r = fitRect(art, w, h, inset: 0.86)
++        c.saveGState()
++        c.setShadow(offset: CGSize(width: 0, height: -Double(h) * 0.012), blur: Double(h) * 0.05, color: CGColor(gray: 0, alpha: 0.6))
++        c.draw(art, in: r)
++        c.restoreGState()
++    }
++    return c.makeImage()!
++}
++
++func shelf(_ art: CGImage, _ w: Int, _ h: Int) -> CGImage {
++    let c = bitmap(w, h)
++    c.draw(backLayer(art, w, h), in: CGRect(x: 0, y: 0, width: w, height: h))
++    if !wide(art) { c.draw(art, in: fitRect(art, w, h, inset: 0.86)) }
++    return c.makeImage()!
++}
++
++func writePNG(_ image: CGImage, _ url: URL) {
++    guard let d = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { fail("cannot write \(url.path)") }
++    CGImageDestinationAddImage(d, image, nil)
++    if !CGImageDestinationFinalize(d) { fail("cannot write \(url.path)") }
++}
++
++func writeJSON(_ value: Any, _ url: URL) {
++    try! FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
++    try! JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]).write(to: url)
++}
++
++let info: [String: Any] = ["author": "xcode", "version": 1]
++
++func imageStack(_ art: CGImage, _ name: String, _ w: Int, _ h: Int, _ scales: [Int], in brand: URL) -> String {
++    let stack = brand.appendingPathComponent(name + ".imagestack")
++    let layers = ["Front", "Back"]
++    writeJSON(["info": info, "layers": layers.map { ["filename": $0 + ".imagestacklayer"] }], stack.appendingPathComponent("Contents.json"))
++    for layer in layers {
++        let dir = stack.appendingPathComponent(layer + ".imagestacklayer")
++        writeJSON(["info": info], dir.appendingPathComponent("Contents.json"))
++        let set = dir.appendingPathComponent("Content.imageset")
++        var images: [[String: Any]] = []
++        for s in scales {
++            let file = "icon@\(s)x.png"
++            writeJSON(["info": info], set.appendingPathComponent("Contents.json"))
++            writePNG(layer == "Back" ? backLayer(art, w * s, h * s) : frontLayer(art, w * s, h * s), set.appendingPathComponent(file))
++            images.append(["idiom": "tv", "filename": file, "scale": "\(s)x"])
++        }
++        writeJSON(["info": info, "images": images], set.appendingPathComponent("Contents.json"))
++    }
++    return name + ".imagestack"
++}
++
++func shelfSet(_ art: CGImage, _ name: String, _ w: Int, _ h: Int, in brand: URL) -> String {
++    let set = brand.appendingPathComponent(name + ".imageset")
++    var images: [[String: Any]] = []
++    for s in [1, 2] {
++        let file = "shelf@\(s)x.png"
++        writeJSON(["info": info], set.appendingPathComponent("Contents.json"))
++        writePNG(shelf(art, w * s, h * s), set.appendingPathComponent(file))
++        images.append(["idiom": "tv", "filename": file, "scale": "\(s)x"])
++    }
++    writeJSON(["info": info, "images": images], set.appendingPathComponent("Contents.json"))
++    return name + ".imageset"
++}
++
++let args = CommandLine.arguments
++guard args.count == 3 else { fail("usage: tv_icon.swift <image> <Assets.xcassets>") }
++let art = loadImage(args[1])
++
++let catalog = URL(fileURLWithPath: args[2]), brand = catalog.appendingPathComponent("AppIcon.brandassets")
++try? FileManager.default.removeItem(at: brand)
++writeJSON(["info": info], catalog.appendingPathComponent("Contents.json"))
++writeJSON(["info": info, "assets": [
++    ["idiom": "tv", "size": "400x240", "role": "primary-app-icon", "filename": imageStack(art, "App Icon", 400, 240, [1, 2], in: brand)],
++    ["idiom": "tv", "size": "1280x768", "role": "primary-app-icon", "filename": imageStack(art, "App Icon - App Store", 1280, 768, [1], in: brand)],
++    ["idiom": "tv", "size": "1920x720", "role": "top-shelf-image", "filename": shelfSet(art, "Top Shelf Image", 1920, 720, in: brand)],
++    ["idiom": "tv", "size": "2320x720", "role": "top-shelf-image-wide", "filename": shelfSet(art, "Top Shelf Image Wide", 2320, 720, in: brand)],
++]], brand.appendingPathComponent("Contents.json"))

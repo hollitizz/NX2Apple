@@ -1,0 +1,447 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hollitizz <valentin.caure@epitech.eu>
+Date: Wed, 25 Nov 2026 15:27:18 +0100
+Subject: [PATCH] ios: compile the host and the iOS front end for the tvOS SDK
+
+The tvOS SDK marks APIs the iPhone front end uses as unavailable, so nothing built for an Apple TV.
+Guard them out on TARGET_OS_TV, leaving iOS unchanged: sigaltstack (crash.c, main.m), the volume's
+important-usage capacity (hle_svc.c, -1 as when the query fails), WebKit (web_apple.m: the weak
+defaults of hle_web.c answer), CoreMotion, haptics, hover and multitouch (DmGamepad.m, whose touch
+controls stay hidden), orientation masks and rotation (DmLayout.h, DmRotation.h, front_ios.m, main.m),
+screen brightness, the scene accessory, delivered notifications and the Home button setting.
+The same guards as seedds/nxnative#868, carried over to the code at the pin.
+
+Upstream-Status: fork-only
+Reason: the iOS front end and host built for the tvOS SDK, for Apple TV builds (the guards of the open seedds/nxnative#868, at the pin)
+Issue: LNPANDY/NX2Apple#85
+
+---
+ dm/host/crash.c             |  4 ++++
+ dm/host/hle_svc.c           |  4 ++++
+ dm/host/web_apple.m         |  4 ++++
+ dm/ios/Sources/DmGamepad.m  | 29 ++++++++++++++++++++++++--
+ dm/ios/Sources/DmLayout.h   |  2 ++
+ dm/ios/Sources/DmRotation.h |  2 ++
+ dm/ios/Sources/front_ios.m  | 41 +++++++++++++++++++++++++++++--------
+ dm/ios/Sources/main.m       |  6 ++++++
+ 8 files changed, 81 insertions(+), 11 deletions(-)
+
+diff --git a/dm/host/crash.c b/dm/host/crash.c
+index bb2fb21..da01f3b 100644
+--- a/dm/host/crash.c
++++ b/dm/host/crash.c
+@@ -257,6 +257,9 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
+ }
+ // The signal alternate stack is per thread: every guest thread must call this when it starts running (only then can the crash state be printed on the alternate stack on a stack overflow)
+ // The alternate stack is released when the thread exits: the pthread key destructor is called at thread exit (disable the alternate stack first, then free). The game frequently starts short-lived threads, and without releasing each one leaks 64 KiB.
++#if TARGET_OS_TV
++void crash_thread_init(void) {}
++#else
+ static pthread_key_t g_altstack_key __attribute__((section("__DATA,__dm_keep")));
+ static pthread_once_t g_altstack_once __attribute__((section("__DATA,__dm_keep"))) = PTHREAD_ONCE_INIT;
+ static void altstack_free(void *p) { stack_t off = {.ss_flags = SS_DISABLE}; sigaltstack(&off, 0); free(p); }
+@@ -267,6 +270,7 @@ void crash_thread_init(void) {
+     stack_t ss = {.ss_sp = malloc(65536), .ss_size = 65536}; sigaltstack(&ss, 0);
+     pthread_setspecific(g_altstack_key, ss.ss_sp);
+ }
++#endif
+ void crash_install(void) {
+     crash_thread_init();
+     struct sigaction sa = {.sa_sigaction = on_crash, .sa_flags = SA_SIGINFO | SA_ONSTACK};
+diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
+index a2817ee..61d546c 100644
+--- a/dm/host/hle_svc.c
++++ b/dm/host/hle_svc.c
+@@ -159,6 +159,9 @@ static void guest_file_sweep(void);
+ // The query asks the system's cache-delete service: 4-65 ms on the Mac, where it gave 14.73 GB for 14.71 of f_bavail (little is purgeable there). -1 when it fails
+ static char g_gf_dir[1024];
+ static double guest_file_free_important(void) {
++#if TARGET_OS_TV
++    return -1;
++#else
+     CFURLRef u = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)g_gf_dir, (CFIndex)strlen(g_gf_dir), true);   // a new URL each time: one caches the values it gave
+     double r = -1; int64_t x; CFTypeRef v = NULL;
+     if (!u) return r;
+@@ -167,6 +170,7 @@ static double guest_file_free_important(void) {
+         CFRelease(v);
+     }
+     CFRelease(u); return r;
++#endif
+ }
+ // Every second the room left on the files' disk (they all lie on one volume): its free space less what the files' dirty pages may take when the kernel writes them out. Under
+ // DM_GUEST_FILE_MIN_FREE (default 2G) the game is stopped (exit code 87; the memory watchdog's is 86, hle_nvn.c), before a full disk leaves the kernel no room to write the guest's pages out.
+diff --git a/dm/host/web_apple.m b/dm/host/web_apple.m
+index fd97d90..b82a76c 100644
+--- a/dm/host/web_apple.m
++++ b/dm/host/web_apple.m
+@@ -11,6 +11,9 @@
+ // only once released. A click or touch on the page focuses what it lands on and presses A there. The page is transparent where it draws nothing, over the game's picture; its
+ // 1280x720 is fitted to the game's 16:9 picture. Its sounds follow the host's audio (DM_AUDIO; silent on the Mac by default)
+ #include <TargetConditionals.h>
++#if TARGET_OS_TV
++int front_web_touch(void) { return 0; }
++#else
+ #if TARGET_OS_IPHONE
+ #import <UIKit/UIKit.h>
+ typedef UIView DmView;
+@@ -499,3 +502,4 @@ void front_web_shot(const char *path) {
+ #endif
+ }
+ void front_web_close(void) { dispatch_async(dispatch_get_main_queue(), ^{ if (g_box) { [g_box close]; g_box = nil; } }); }
++#endif
+diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
+index 5780612..40f5c62 100644
+--- a/dm/ios/Sources/DmGamepad.m
++++ b/dm/ios/Sources/DmGamepad.m
+@@ -20,7 +20,9 @@
+ //   Shaking the phone shakes the controller (DM_BTN_SHAKE: its six-axis sensor, hle_hid.c), whichever controls are in use; see "Shaking the phone" below.
+ #import <UIKit/UIKit.h>
+ #import <GameController/GameController.h>
++#if !TARGET_OS_TV
+ #import <CoreMotion/CoreMotion.h>
++#endif
+ #import <CoreText/CoreText.h>
+ #include <pthread.h>
+ #include "dm.h"
+@@ -51,6 +53,7 @@
+     pthread_mutex_unlock(&g_mu);
+ }
+ 
++#if !TARGET_OS_TV
+ // ---- Shaking the phone ----
+ // The accelerometer at 60 Hz (no gyroscope, no permission prompt): gravity is followed by a slow low-pass (about 0.8 s), and a sample whose acceleration beyond it exceeds DM_SHAKE_G
+ // (1.5 G by default; Documents/env.txt overrides) is a hit. The controller is shaken until 120 ms after the last hit: a flick is one shake (the host finishes it as a whole cycle)
+@@ -114,6 +117,7 @@ static void phone_motion_start(UIView *body) {
+     }];
+ }
+ 
++#endif
+ // ---- Layout constants ----
+ // Where each control is drawn (in u, x measured from the outer edge, the right half mirrors) is DmPadGeometry.h: pure functions of the bounds, the safe area,
+ // the DmLayout split and the player's options (DM_TOUCH_SIZE), tested on the Mac (dm/ios/tests/test_pad_geometry.py). Drawing, the hit-test and the grab all read it.
+@@ -173,7 +177,9 @@ @implementation DmGamepad {
+     NSString *_padHintWords; BOOL _padHintShown;
+     unsigned _menuGen;                             // generation counter for the controller-idle menu fade timer
+     BOOL _menuOpen;                                // the in-game menu is currently presented
++#if !TARGET_OS_TV
+     UIImpactFeedbackGenerator *_touchFeedback;       // one short feedback per touch-control press edge
++#endif
+     unsigned _hapticSticks;
+     BOOL _stickShown;                              // the left stick was held at the last refresh
+     BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
+@@ -186,7 +192,9 @@ @implementation DmGamepad {
+     unsigned _loggedDropped;                       // the moved controls that kept their place, as last logged
+     UITouch *_game[16];                           // touches on the game's touch screen by finger slot
+     CGPoint _nmLast; BOOL _nmActive;              // virtual Switch 2 Nmouse state for unclaimed touches / pointer hover
++#if !TARGET_OS_TV
+     UIHoverGestureRecognizer *_nmHover API_AVAILABLE(ios(13.4));
++#endif
+ }
+ 
+ static UIColor *k_idle, *k_on, *k_line, *k_ringFill, *k_text, *k_textOn;
+@@ -219,7 +227,11 @@ - (instancetype)initWithFrame:(CGRect)f {
+         [self registerForTraitChanges:@[UITraitDisplayScale.class] withHandler:^(id<UITraitEnvironment> environment, UITraitCollection *previous) {
+             [(UIView *)environment setNeedsLayout];
+         }];
+-        self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
++#if !TARGET_OS_TV
++        self.multipleTouchEnabled = YES;
++#endif
++        self.opaque = NO; self.backgroundColor = UIColor.clearColor;
++#if !TARGET_OS_TV
+         if (@available(iOS 13.4, *)) {
+             _nmHover = [[UIHoverGestureRecognizer alloc] initWithTarget:self action:@selector(onHover:)];
+             [self addGestureRecognizer:_nmHover];
+@@ -229,6 +241,7 @@ - (instancetype)initWithFrame:(CGRect)f {
+             _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+             [_touchFeedback prepare];
+         }
++#endif
+         _owner = [NSMapTable strongToStrongObjectsMapTable]; _faceOf = [NSMapTable strongToStrongObjectsMapTable];
+         if (!k_idle) {
+             // each colour carries its own low opacity instead of lowering the whole view's alpha (that would add an off-screen pass for the full-screen layer)
+@@ -277,8 +290,10 @@ - (instancetype)initWithFrame:(CGRect)f {
+         [nc addObserver:self selector:@selector(updateControlVisibility) name:UIAccessibilityVoiceOverStatusDidChangeNotification object:nil];
+         pads_start();
+         [self padsChanged:nil];
++#if !TARGET_OS_TV
+         motion_start();
+         phone_motion_start(self);
++#endif
+     }
+     return self;
+ }
+@@ -301,8 +316,10 @@ - (void)opmodeChanged {   // docked: the Tap layout goes (the game reads no touc
+     [self reset]; _tap = NO; _full = NO; [self applyLayout]; [self setNeedsLayout];
+ }
+ - (void)setTouchFeedback:(BOOL)on {
++#if !TARGET_OS_TV
+     if (!on) { _touchFeedback = nil; return; }
+     if (!_touchFeedback) { _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [_touchFeedback prepare]; }
++#endif
+ }
+ 
+ // ---- Layout (points; computed inside the safe area) ----
+@@ -399,9 +416,11 @@ - (void)recompute {
+     BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits;
+     uint64_t pressed = (face | dpad | btn) & ~(_faceBits | _dpadBits | _btnBits);
+     unsigned gripping = (_stick[0] ? 1u : 0) | (_stick[1] ? 2u : 0);
++#if !TARGET_OS_TV
+     if (pressed || (gripping & ~_hapticSticks)) {
+         [_touchFeedback impactOccurredWithIntensity:0.6]; [_touchFeedback prepare];
+     }
++#endif
+     _hapticSticks = gripping;
+     _faceBits = face; _dpadBits = dpad; _btnBits = btn;
+     pthread_mutex_lock(&g_mu);
+@@ -412,6 +431,7 @@ - (void)recompute {
+     if (changed || stick || _stickShown) [self refresh];   // also refresh on the stick release so the knob returns to the centre
+     _stickShown = stick;
+ }
++#if !TARGET_OS_TV
+ - (void)onHover:(UIHoverGestureRecognizer *)gr API_AVAILABLE(ios(13.4)) {
+     if (!dm_joy_mouse_wanted()) return;
+     CGRect b = _layout.game;
+@@ -428,6 +448,7 @@ - (void)onHover:(UIHoverGestureRecognizer *)gr API_AVAILABLE(ios(13.4)) {
+     dm_host_mouse((float)p.x, (float)p.y, dx, dy, 0, 0, 0,
+                   DM_HOST_MOUSE_FLAG_ABS | DM_HOST_MOUSE_FLAG_REL | DM_HOST_MOUSE_FLAG_SURFACE);
+ }
++#endif
+ // Touches no control takes go to the game's touch screen, normalized on front_ios.m's actual 16:9 viewport (including portrait and tabletop splits, and the cropped Fill picture): Super Mario Galaxy's pointer in handheld mode (profile op_mode). The host reports them only in handheld mode, as on the Switch (hle_hid.c touch_read)
+ - (void)pushGame {
+     CGRect b = _layout.game;
+@@ -561,7 +582,9 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
+ 
+ - (void)layoutSubviews {
+     [super layoutSubviews];
++#if !TARGET_OS_TV
+     UIWindowScene *ws = self.window.windowScene; if (ws) atomic_store(&g_iface_orient, (int)ws.effectiveGeometry.interfaceOrientation);
++#endif
+     CGFloat u = self.u;
+     [CATransaction begin]; [CATransaction setDisableActions:YES];
+     CGFloat scale = MAX(self.traitCollection.displayScale, 1);
+@@ -928,7 +951,7 @@ - (void)setMenuOpen:(BOOL)open {
+     if (_padOff && !_layout.onTV) [self wakeMenu];
+ }
+ - (void)updateControlVisibility {
+-    _controls.hidden = _padOff;
++    _controls.hidden = _padOff || TARGET_OS_TV;
+     if (_padOff && _layout.onTV) {
+         ++_menuGen; [_menu.layer removeAllAnimations];
+         _menu.alpha = 1; _menu.hidden = YES;
+@@ -1081,12 +1104,14 @@ void dm_gamepad_reset(void) {   // On resign active: release everything (a key h
+ __attribute__((weak)) void dm_switch2_teardown(void);
+ void dm_gamepad_teardown(void) {
+     if (dm_switch2_teardown) dm_switch2_teardown();
++#if !TARGET_OS_TV
+     if (g_motion) {
+         [g_motion stopAccelerometerUpdates];
+         [g_motion stopDeviceMotionUpdates];
+         if (@available(iOS 27.0, *)) g_motion.deviceMotionBody = nil;
+         g_motion = nil;
+     }
++#endif
+     if (g_view) {
+         [NSNotificationCenter.defaultCenter removeObserver:g_view];
+         [g_view reset];
+diff --git a/dm/ios/Sources/DmLayout.h b/dm/ios/Sources/DmLayout.h
+index 4045566..a689d24 100644
+--- a/dm/ios/Sources/DmLayout.h
++++ b/dm/ios/Sources/DmLayout.h
+@@ -14,11 +14,13 @@ static inline BOOL dm_layout_custom_controls_full_bounds(CGRect bounds, BOOL hin
+ // Rotation (DM_ROTATION, a launcher and in-game menu setting): auto, landscape or portrait. auto gives `automatic`: every orientation for the view controllers, so the app's own list
+ // decides, and for the app (front_ios_app_orientations) its Info.plist list for the device: the phone's two landscapes, the iPad's four. landscape locks the two landscapes, portrait
+ // upright (upside down too where the device has it: an iPad, not a Face ID iPhone)
++#if !TARGET_OS_TV
+ static inline UIInterfaceOrientationMask dm_rotation_mask(const char *_Nullable value, UIInterfaceOrientationMask automatic) {
+     if (value && !strcmp(value, "landscape")) return UIInterfaceOrientationMaskLandscape;
+     if (value && !strcmp(value, "portrait")) return UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown;
+     return automatic;
+ }
++#endif
+ 
+ static inline UIEdgeInsets dm_game_safe_insets(CGRect bounds, UIEdgeInsets insets, BOOL duo) {
+     return duo && bounds.size.height > bounds.size.width ? UIEdgeInsetsMake(insets.top, 0, 0, 0) : insets;
+diff --git a/dm/ios/Sources/DmRotation.h b/dm/ios/Sources/DmRotation.h
+index c61c433..af49e8d 100644
+--- a/dm/ios/Sources/DmRotation.h
++++ b/dm/ios/Sources/DmRotation.h
+@@ -6,8 +6,10 @@
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
++#if !TARGET_OS_TV
+ UIInterfaceOrientationMask dm_rotation_vc_mask(void);   // a full-screen view controller's: every orientation under auto (the app's list decides)
+ UIInterfaceOrientationMask front_ios_app_orientations(void);   // the app's (application:supportedInterfaceOrientationsForWindow:): under auto its Info.plist list for this device
++#endif
+ void dm_rotation_set(const char *_Nullable value);   // main thread: DM_ROTATION = value (NULL keeps the environment's), and the windows turn to an orientation it allows
+ #ifdef __cplusplus
+ }
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index a0f79f4..77b80a1 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -145,7 +145,7 @@ - (void)viewDidLoad {
+         [self showHint:why ? [NSString stringWithFormat:@"Game files unusable.\n%s", why] : @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart."]; return;
+     }
+     front_ios_audio_watch();
+-#if defined(__IPHONE_27_0)   // compiled only with an SDK that has the scene accessory API
++#if defined(__IPHONE_27_0) && !TARGET_OS_TV   // compiled only with an SDK that has the scene accessory API
+     if (@available(iOS 27.0, *)) {   // iOS 27 offers a TV scene only to a registered scene accessory, no longer from the Info.plist entry alone (that path stays for iOS 26)
+         UISceneConfiguration *c = [[UISceneConfiguration alloc] initWithName:@"TV" sessionRole:UIWindowSceneSessionRoleExternalDisplayNonInteractive];
+         c.delegateClass = DmTVSceneDelegate.class;
+@@ -270,12 +270,15 @@ - (void)viewDidAppear:(BOOL)a {
+ - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+ - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
+ - (BOOL)prefersStatusBarHidden { return YES; }
++#if !TARGET_OS_TV
+ - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return dm_rotation_vc_mask(); }
++#endif
+ @end
+ UIViewController *front_ios_root(void) { return [DmRootVC new]; }
+ 
+ // Rotation (DM_ROTATION; DmRotation.h, DmLayout.h dm_rotation_mask). The phone's Info.plist lists only the two landscapes (the Duo's inner display follows its bounds) and the iPad's
+ // all four; the app delegate (main.m) answers with this, which replaces that list, so portrait can be chosen on a phone too while auto keeps each device's list
++#if !TARGET_OS_TV
+ UIInterfaceOrientationMask dm_rotation_vc_mask(void) { return dm_rotation_mask(getenv("DM_ROTATION"), UIInterfaceOrientationMaskAll); }
+ static UIInterfaceOrientationMask plist_orientations(void) {
+     NSArray *list = nil;
+@@ -291,11 +294,7 @@ static UIInterfaceOrientationMask plist_orientations(void) {
+     return m ? m : UIInterfaceOrientationMaskAll;
+ }
+ UIInterfaceOrientationMask front_ios_app_orientations(void) { return dm_rotation_mask(getenv("DM_ROTATION"), plist_orientations()); }
+-static char g_rotation_was[16];
+-void dm_rotation_set(const char *value) {
+-    if (value) setenv("DM_ROTATION", value, 1);
+-    const char *now = getenv("DM_ROTATION"); if (!now || !*now) now = "auto";
+-    if (strcmp(g_rotation_was, now)) { snprintf(g_rotation_was, sizeof g_rotation_was, "%s", now); LOG("front end: rotation %s (DM_ROTATION)", now); }
++static void rotation_turn_windows(const char *now) {
+     UIInterfaceOrientationMask m = front_ios_app_orientations() & dm_rotation_vc_mask();
+     for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+         if (![sc isKindOfClass:UIWindowScene.class] || ![sc.session.role isEqualToString:UIWindowSceneSessionRoleApplication]) continue;   // not a TV's
+@@ -307,6 +306,16 @@ void dm_rotation_set(const char *value) {
+                 LOG("front end: rotation %s: the window did not turn (%s)", now, e.localizedDescription.UTF8String); }];
+     }
+ }
++#endif
++static char g_rotation_was[16];
++void dm_rotation_set(const char *value) {
++    if (value) setenv("DM_ROTATION", value, 1);
++    const char *now = getenv("DM_ROTATION"); if (!now || !*now) now = "auto";
++    if (strcmp(g_rotation_was, now)) { snprintf(g_rotation_was, sizeof g_rotation_was, "%s", now); LOG("front end: rotation %s (DM_ROTATION)", now); }
++#if !TARGET_OS_TV
++    rotation_turn_windows(now);
++#endif
++}
+ 
+ // A TV (cable or AirPlay): iOS gives the app the TV as a scene of its own instead of mirroring the phone. The game's view moves there, 16:9 fills the TV, and the game is
+ // docked as a Switch on its dock (1080p, the operation mode change notification); the phone keeps the pad. Unplugging puts the view back and the mode the game had before
+@@ -409,8 +418,10 @@ - (void)sceneDidDisconnect:(UIScene *)s { if (g_tv == self.window) tv_detach();
+ int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
+ double dm_brightness_now(void) { return g_brightness; }
+ static void front_ios_power_watch(void) {
++#if !TARGET_OS_TV
+     g_brightness = UIScreen.mainScreen.brightness;
+     g_obs[0] = [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
++#endif
+     g_obs[1] = [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
+     g_obs[2] = [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+@@ -518,7 +529,10 @@ static void front_ios_notify_setup(void) {   // at each start: the delegate, and
+     if (!multi_program()) return;
+     UNUserNotificationCenter *c = UNUserNotificationCenter.currentNotificationCenter;
+     g_notify_delegate = [DmNotifyDelegate new]; c.delegate = g_notify_delegate;
+-    [c removeAllPendingNotificationRequests]; [c removeAllDeliveredNotifications];
++    [c removeAllPendingNotificationRequests];
++#if !TARGET_OS_TV
++    [c removeAllDeliveredNotifications];
++#endif
+ }
+ static void front_ios_notify_ask(void) {   // iOS asks the player only while the choice is not made, so this shows a prompt at the first start alone
+     if (!multi_program()) return;
+@@ -526,10 +540,14 @@ static void front_ios_notify_ask(void) {   // iOS asks the player only while the
+         LOG("front end: notifications %s%s%s", granted ? "allowed" : "not allowed", e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }];
+ }
+ static int notify_allowed(void) {
++#if TARGET_OS_TV
++    return 0;
++#else
+     __block UNAuthorizationStatus st = UNAuthorizationStatusNotDetermined; dispatch_semaphore_t got = dispatch_semaphore_create(0);
+     [UNUserNotificationCenter.currentNotificationCenter getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *t) { st = t.authorizationStatus; dispatch_semaphore_signal(got); }];
+     if (dispatch_semaphore_wait(got, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC))) return 0;
+     return st == UNAuthorizationStatusAuthorized || st == UNAuthorizationStatusProvisional || st == UNAuthorizationStatusEphemeral;
++#endif
+ }
+ static void handoff_notice(NSString *text) {   // the game is ending: no sound, and a line on a dark screen in its place
+     dm_audio_suspend(1);
+@@ -555,6 +573,7 @@ static void handoff_notice(NSString *text) {   // the game is ending: no sound,
+         LOG("front end: program %d starts at the next start of the app (notifications not allowed)", index);
+         usleep(3000 * 1000); return;
+     }
++#if !TARGET_OS_TV
+     handoff_notice([NSString stringWithFormat:@"Starting %@\u2026", nm]);
+     usleep(1500 * 1000);
+     UNMutableNotificationContent *c = [UNMutableNotificationContent new]; c.body = [NSString stringWithFormat:@"Tap to start %@", nm];
+@@ -564,6 +583,7 @@ static void handoff_notice(NSString *text) {   // the game is ending: no sound,
+     if (dispatch_semaphore_wait(added, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC))) LOG("[RED] front end: the notification for program %d was not scheduled within 2 s", index);
+     else if (err) LOG("[RED] front end: the notification for program %d could not be scheduled: %s", index, err.localizedDescription.UTF8String);
+     else LOG("front end: \"Starting %s\" shown, notification for program %d scheduled", nm.UTF8String, index);
++#endif
+ }
+ void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
+ 
+@@ -848,7 +868,10 @@ static void quit_show_prompt(GCController *holder) {
+     GCController *pad = holder; if (!pad) for (GCController *c in GCController.controllers) if (c.extendedGamepad) { pad = c; break; }
+     GCExtendedGamepad *g = pad.extendedGamepad;   // with a controller the pills show its own A and B, with touch alone the words only
+     DmQuitView *v = [[DmQuitView alloc] initWithFrame:root.bounds];
+-    v.multipleTouchEnabled = NO; v.down = -1; v.opened = CACurrentMediaTime();
++#if !TARGET_OS_TV
++    v.multipleTouchEnabled = NO;
++#endif
++    v.down = -1; v.opened = CACurrentMediaTime();
+     v.layout = qp_layout_make(root.bounds.size, quit_text(HQ_TEXT_TITLE), quit_text(HQ_TEXT_NOTE), quit_text(HQ_TEXT_QUIT), quit_text(HQ_TEXT_CANCEL), g != nil);
+     UIImage *ga = g ? quit_glyph(g.buttonA.sfSymbolsName, @"a.circle") : nil, *gb = g ? quit_glyph(g.buttonB.sfSymbolsName, @"b.circle") : nil;
+     CALayer *actions = nil; qp_layout l = v.layout;
+@@ -1012,7 +1035,7 @@ static void quit_close(void) {   // the app is leaving the foreground: whatever
+ // the app decides ("app"). Either way the in-game menu's Quit stays, as the gear stays with a controller
+ void front_ios_quit_controllers(void) {
+     quit_start();
+-#if defined(__IPHONE_27_0)
++#if defined(__IPHONE_27_0) && !TARGET_OS_TV
+     if (@available(iOS 27.0, *)) {
+         static int done; if (done || !g_hq_on) return;
+         int any = 0; for (GCController *c in GCController.controllers) if (c.extendedGamepad) any = 1;
+diff --git a/dm/ios/Sources/main.m b/dm/ios/Sources/main.m
+index 0112f96..d4c7a8b 100644
+--- a/dm/ios/Sources/main.m
++++ b/dm/ios/Sources/main.m
+@@ -31,7 +31,9 @@
+ 
+ int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
+ UIViewController *front_ios_root(void);
++#if !TARGET_OS_TV
+ UIInterfaceOrientationMask front_ios_app_orientations(void);   // front_ios.m: the orientations Rotation allows (DM_ROTATION)
++#endif
+ void front_ios_focus_event(int ev);
+ 
+ static char *g_argv[4]; static int g_argc;
+@@ -375,7 +377,9 @@ static int boot_env(void) {
+ 
+ static void *boot_thread(void *p) {
+     (void)p;
++#if !TARGET_OS_TV
+     static char alt[65536]; stack_t ss = {.ss_sp = alt, .ss_size = sizeof alt}; sigaltstack(&ss, 0);   // crash printing must work on the host thread too
++#endif
+     int rc = dm_main(g_argc, g_argv);
+     fprintf(stderr, "boot: dm_main returned %d\n", rc);
+     return NULL;
+@@ -395,7 +399,9 @@ - (UISceneConfiguration *)application:(UIApplication *)a configurationForConnect
+     return [[UISceneConfiguration alloc] initWithName:[s.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive] ? @"TV" : @"Default" sessionRole:s.role];   // a TV (front_ios.m DmTVSceneDelegate)
+ }
+ // Replaces the Info.plist orientation list: Rotation (DM_ROTATION) can turn a phone upright, auto keeps the list (front_ios.m front_ios_app_orientations)
++#if !TARGET_OS_TV
+ - (UIInterfaceOrientationMask)application:(UIApplication *)a supportedInterfaceOrientationsForWindow:(UIWindow *)w { return front_ios_app_orientations(); }
++#endif
+ @end
+ 
+ // Scene lifecycle: create the window + hand focus events to front_ios.m

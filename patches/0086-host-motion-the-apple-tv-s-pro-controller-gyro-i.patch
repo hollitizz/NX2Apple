@@ -1,0 +1,254 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hollitizz <valentin.caure@epitech.eu>
+Date: Wed, 25 Nov 2026 16:53:22 +0100
+Subject: [PATCH] host/motion: the Apple TV's Pro Controller gyro: its rest
+ offset, per-axis scale and smoothing
+
+tvOS hands a Switch Pro Controller's gyro over uncalibrated. Still, it reads 11 deg/s off on one axis
+and 5 on another; the rest learner refused any first offset above 2 deg/s, so the offset was never
+taken off and the pointer drifted. MOTION_REST_FIRST_MAX can now be set at build time, and the tvOS
+project sets 0.35 rad/s (20 deg/s); every other build keeps 2 deg/s.
+
+Measured against gravity on an Apple TV 4K, its x and y axes read 15% low (78 deg for 92) and z true.
+DM_MOTION_SCALE takes one factor or x,y,z for a GameController gyro, after the rest offset
+(1.18,1.17,1 puts this controller right); DM_MOTION_SMOOTH_MS adds a one-pole low-pass. Both default
+to no change. t_motion_rest_tv checks the learner with the measured offset, the scale, its parsing and
+the smoothing.
+
+Upstream-Status: fork-only
+Reason: tvOS gives a Pro Controller's gyro uncalibrated, so the Apple TV build needs a wider rest offset bound and a per-axis scale
+Issue: LNPANDY/NX2Apple#85
+---
+ dm/host/hle_hid.c                | 19 +++++--
+ dm/host/motion_fusion.h          | 30 ++++++++++-
+ dm/host/tests/Makefile           |  4 ++
+ dm/host/tests/t_motion_rest_tv.c | 86 ++++++++++++++++++++++++++++++++
+ dm/ios/project_tv.yml            |  2 +-
+ 5 files changed, 135 insertions(+), 6 deletions(-)
+ create mode 100644 dm/host/tests/t_motion_rest_tv.c
+
+diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
+index ca149c1..f192747 100644
+--- a/dm/host/hle_hid.c
++++ b/dm/host/hle_hid.c
+@@ -905,16 +905,23 @@ enum { MOTION_STALE_NS = 300000000 };
+ enum { LIVE_RING = 128 };
+ #define LIVE_BLEND_MAX_NS 50000000ull   // live_at: past 50 ms between two samples, no blend of their directions
+ typedef struct { uint64_t t; float acc[3], gyro[3], angle[3], dir[9]; } motion_sample;   // t: the sample's host ns in the ring, guest ns once copied out (live_ring_copy); the SixAxisSensorState fields (motion_fill)
+-typedef struct { pthread_mutex_t mu; motion_state st; uint64_t last_ns, received_ns, logged; motion_sample ring[LIVE_RING]; unsigned head, count; motion_rest rest; motion_lag lag; } live_motion;
++typedef struct { pthread_mutex_t mu; motion_state st; uint64_t last_ns, received_ns, logged; motion_sample ring[LIVE_RING]; unsigned head, count; motion_rest rest; motion_smooth smooth; motion_lag lag; } live_motion;
+ static live_motion g_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
+ static live_motion g_hid_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
+ static live_motion g_joy_motion[DM_PLAYERS][2] = {[0 ... DM_PLAYERS - 1] = {[0 ... 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}}};   // each Joy-Con's own sensor (dm_motion_set_joy)
+ static live_motion g_direct_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
+ static live_motion g_phone_motion = {.mu = PTHREAD_MUTEX_INITIALIZER};
+ static pthread_once_t g_motion_once = PTHREAD_ONCE_INIT;
+-static motion_map g_motion_map; static float g_motion_gain = 0.5f; static int g_motion_off, g_motion_log, g_phone_mode;
++static motion_map g_motion_map; static float g_motion_gain = 0.5f, g_motion_scale[3] = {1, 1, 1}, g_motion_smooth_s = 0; static int g_motion_off, g_motion_log, g_phone_mode;
++static void motion_feel_env(void) {
++    const char *e = getenv("DM_MOTION_SCALE");
++    if (e && *e && !motion_scale_parse(e, g_motion_scale)) LOG("[RED] [hid] DM_MOTION_SCALE='%s' is not one factor or x,y,z above 0: the gyro keeps its scale", e);
++    if ((e = getenv("DM_MOTION_SMOOTH_MS")) && atof(e) > 0) g_motion_smooth_s = (float)(atof(e) / 1000);
++    LOG("[hid] controller gyro: scale %.2f %.2f %.2f, smoothing %.0f ms (DM_MOTION_SCALE, DM_MOTION_SMOOTH_MS)", g_motion_scale[0], g_motion_scale[1], g_motion_scale[2], g_motion_smooth_s * 1000);
++}
+ static void motion_env(void) {
+     const char *e = getenv("DM_MOTION"); g_motion_off = e && !atoi(e);
++    motion_feel_env();
+     if (!motion_map_parse(&g_motion_map, getenv("DM_MOTION_AXES"))) LOG("[hid] DM_MOTION_AXES='%s' is not like \"x,-z,y\": using x,y,z", getenv("DM_MOTION_AXES"));
+     if ((e = getenv("DM_MOTION_ACC_SIGN")) && atof(e) < 0) g_motion_map.acc_sign = -1;
+     if ((e = getenv("DM_MOTION_GAIN"))) g_motion_gain = (float)atof(e);
+@@ -954,13 +961,17 @@ static void motion_set_to(live_motion *m, int p, const float acc[3], const float
+     uint64_t now = now_ns(), t = sample_ns ? sample_ns : now;
+     if (!t || t > now || now - t > MOTION_STALE_NS) return;
+     pthread_mutex_lock(&m->mu);
+-    if (!m->last_ns || now - m->received_ns > MOTION_STALE_NS) { motion_reset(&m->st); m->last_ns = 0; m->count = 0; motion_lag_reset(&m->lag); if (m->received_ns) motion_rest_reset(&m->rest); }   // stale: forget the offset too
++    if (!m->last_ns || now - m->received_ns > MOTION_STALE_NS) { motion_reset(&m->st); m->last_ns = 0; m->count = 0; motion_lag_reset(&m->lag); motion_smooth_reset(&m->smooth); if (m->received_ns) motion_rest_reset(&m->rest); }   // stale: forget the offset too
+     else if (t - m->last_ns > MOTION_REST_GAP_NS) motion_rest_break(&m->rest);   // a gap: the rest window starts again
+     if (m->last_ns && t <= m->last_ns) { pthread_mutex_unlock(&m->mu); return; }
+     float dt = m->last_ns && t > m->last_ns ? (float)((double)(t - m->last_ns) / 1e9) : 0;
+     // GameController reports the gyro with its rest offset (a DualSense: 0.34, 0.20, -0.66 deg/s): the host learns it while the controller rests and takes it off (motion_rest),
+     // as the Joy-Con 2 front end does for its own (s2_rest); the HID and phone sources come corrected
+-    float rc[3]; if (!source) { motion_rest_update(&m->rest, acc, rot, (double)t / 1e9); motion_rest_apply(&m->rest, rot, (double)t / 1e9, rc); rot = rc; }
++    float rc[3], rs[3];
++    if (!source) {
++        motion_rest_update(&m->rest, acc, rot, (double)t / 1e9); motion_rest_apply(&m->rest, rot, (double)t / 1e9, rc);
++        motion_smooth_apply(&m->smooth, g_motion_scale, g_motion_smooth_s, rc, dt, rs); rot = rs;
++    }
+     motion_update(&m->st, source ? &identity : &g_motion_map, acc, rot, dt, g_motion_gain);
+     if (g_motion_log && !p && t - m->logged > 1000000000ull) {
+         m->logged = t;
+diff --git a/dm/host/motion_fusion.h b/dm/host/motion_fusion.h
+index 0e87d0a..aa7340a 100644
+--- a/dm/host/motion_fusion.h
++++ b/dm/host/motion_fusion.h
+@@ -145,7 +145,9 @@ static inline void motion_phone_to_switch(int orient, const float in[3], float o
+ #define MOTION_REST_S 1.0
+ #define MOTION_REST_GYRO_SPAN 0.03f       // rad/s (1.7 deg/s)
+ #define MOTION_REST_ACC_SPAN 0.02f        // G
+-#define MOTION_REST_FIRST_MAX 0.0349f     // rad/s (2 deg/s)
++#ifndef MOTION_REST_FIRST_MAX
++#define MOTION_REST_FIRST_MAX 0.0349f     // rad/s (2 deg/s); the tvOS build sets 0.35 (20 deg/s): tvOS hands a Pro Controller's gyro over uncalibrated, 11 deg/s off at rest
++#endif
+ #define MOTION_REST_AGREE 0.0218f         // rad/s (1.25 deg/s)
+ #define MOTION_REST_RAMP_S 0.75
+ typedef struct { int have, pending; double t0, sum[3], t_set; unsigned n; float bias[3], cand[3], from[3], gmin[3], gmax[3], amin[3], amax[3]; } motion_rest;
+@@ -182,6 +184,32 @@ static inline void motion_rest_update(motion_rest *r, const float acc[3], const
+ }
+ static inline void motion_rest_apply(const motion_rest *r, const float rot[3], double t, float out[3]) { float b[3]; motion_rest_now(r, t, b); for (int i = 0; i < 3; i++) out[i] = rot[i] - b[i]; }
+ 
++// A GameController gyro's scale and feel (DM_MOTION_SCALE, DM_MOTION_SMOOTH_MS): the rate, offset taken off, follows the samples through a one-pole low-pass of time constant
++// tau_s (0: none) and each axis is scaled. tvOS hands a Pro Controller's gyro over uncalibrated: measured against gravity on an Apple TV 4K, its x and y axes read 15% low
++// (78 deg for 92) and z true, so DM_MOTION_SCALE=1.18,1.17,1 puts it right; the gyro comes at about 30 Hz while a pointer game reads it at 60, which smoothing hides
++typedef struct { int have; float last[3]; } motion_smooth;
++static inline void motion_smooth_reset(motion_smooth *s) { s->have = 0; }
++static inline void motion_smooth_apply(motion_smooth *s, const float scale[3], float tau_s, const float rot[3], float dt, float out[3]) {
++    float k = s->have && tau_s > 0 ? dt / (tau_s + dt) : 1;
++    for (int i = 0; i < 3; i++) { s->last[i] += k * (rot[i] - s->last[i]); out[i] = s->last[i] * scale[i]; }
++    s->have = 1;
++}
++// DM_MOTION_SCALE: one factor for every axis, or x,y,z; each above 0. A malformed value leaves out untouched and returns 0
++static inline int motion_scale_parse(const char *text, float out[3]) {
++    float v[3]; int n = 0; const char *p = text; char *end;
++    while (n < 3) {
++        v[n] = strtof(p, &end);
++        if (end == p || !(v[n] > 0)) return 0;
++        n++; p = end;
++        if (*p != ',') break;
++        p++;
++    }
++    if (*p || (n != 1 && n != 3)) return 0;
++    if (n == 1) v[1] = v[2] = v[0];
++    memcpy(out, v, sizeof v);
++    return 1;
++}
++
+ // Playout delay of a live stream (motion_lag): a source sends a sample every 15 to 30 ms while the game reads 5 ms ticks up to the present, so read at the present most ticks lie
+ // past the newest sample and can only hold it. Played back a little late, every tick lies between two samples that have arrived. The delay a stream needs is how long after a
+ // sample's time the next one arrives (arrival_{k+1} - t_k: the sample spacing plus the next one's transport lateness); the stream's delay is the 90th percentile of the last
+diff --git a/dm/host/tests/Makefile b/dm/host/tests/Makefile
+index b762680..50d21ca 100644
+--- a/dm/host/tests/Makefile
++++ b/dm/host/tests/Makefile
+@@ -70,6 +70,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
+ 	$(B)/t_vi_history $(QUIET)
+ 	$(B)/t_nfc
+ 	$(B)/t_motion
++	$(B)/t_motion_rest_tv
+ 	$(B)/t_motion_apple
+ 	$(B)/t_pad_apple
+ 	$(B)/t_account
+@@ -309,6 +310,9 @@ $(B)/t_language: t_language.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
+ 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -fsanitize=address,undefined -I.. $(GINC) -o $@ t_language.c ../hle_profile.c
+ $(B)/t_motion: t_motion.c ../motion_fusion.h | $(B)
+ 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -o $@ t_motion.c -lm
++run: $(B)/t_motion_rest_tv
++$(B)/t_motion_rest_tv: t_motion_rest_tv.c ../motion_fusion.h | $(B)
++	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -o $@ t_motion_rest_tv.c -lm
+ run: $(B)/t_motion_apple
+ $(B)/t_motion_apple: t_motion_apple.m ../motion_apple.h ../dm_input.h | $(B)
+ 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_motion_apple.m -framework Foundation -framework GameController
+diff --git a/dm/host/tests/t_motion_rest_tv.c b/dm/host/tests/t_motion_rest_tv.c
+new file mode 100644
+index 0000000..7fa5a28
+--- /dev/null
++++ b/dm/host/tests/t_motion_rest_tv.c
+@@ -0,0 +1,86 @@
++// The rest offset learner with the Apple TV's wider first-offset bound (MOTION_REST_FIRST_MAX set by the tvOS build): tvOS hands a Switch Pro Controller's gyro over
++// uncalibrated, with a still offset of several degrees a second, which the default bound refuses
++#define MOTION_REST_FIRST_MAX 0.35f
++#include "../motion_fusion.h"
++#include <stdio.h>
++
++static int checks, fails;
++#define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__); } } while (0)
++static int near(float a, float b, float eps) { return fabsf(a - b) <= eps; }
++
++static void feed_still(motion_rest *r, const float a[3], const float w[3], double secs, double step) {
++    for (int n = 0; n * step < secs; n++) motion_rest_update(r, a, w, n * step);
++}
++
++static void pro_controller_offset_is_learned(void) {
++    motion_rest r; motion_rest_reset(&r);
++    float a[3] = {0.0396f, 0.1116f, -0.9341f}, w[3] = {0.0275f, 0.0861f, 0.1901f}, o[3];
++    feed_still(&r, a, w, 2.2, 1 / 30.0);
++    CHECK(r.have, "tv rest: a Pro Controller's 11 deg/s still offset is learned");
++    motion_rest_apply(&r, w, r.t_set + MOTION_REST_RAMP_S, o);
++    CHECK(near(o[0], 0, 1e-4f) && near(o[1], 0, 1e-4f) && near(o[2], 0, 1e-4f), "tv rest: and taken off");
++}
++
++static void turning_controller_learns_nothing(void) {
++    motion_rest r; motion_rest_reset(&r);
++    float a[3] = {0, 0, -1};
++    for (int i = 0; i < 300; i++) { float w[3] = {0.5f * sinf(i * 0.2f), 0, 0}; motion_rest_update(&r, a, w, i / 30.0); }
++    CHECK(!r.have, "tv rest: a turning controller learns nothing");
++}
++
++static const float unit_scale[3] = {1, 1, 1};
++
++static void neutral_shaping_passes_the_rate(void) {
++    motion_smooth s; motion_smooth_reset(&s);
++    float w[3] = {0.4f, -0.2f, 1.0f}, o[3];
++    motion_smooth_apply(&s, unit_scale, 0, w, 0, o);
++    motion_smooth_apply(&s, unit_scale, 0, w, 1 / 30.f, o);
++    CHECK(near(o[0], 0.4f, 1e-6f) && near(o[1], -0.2f, 1e-6f) && near(o[2], 1.0f, 1e-6f), "tv shape: scale 1 and no smoothing leave the rate as it is");
++}
++
++static void scale_applies_per_axis(void) {
++    motion_smooth s; motion_smooth_reset(&s);
++    float w[3] = {1.0f, -0.5f, 0.2f}, k[3] = {1.18f, 1.17f, 1.0f}, o[3];
++    motion_smooth_apply(&s, k, 0, w, 0, o);
++    CHECK(near(o[0], 1.18f, 1e-6f) && near(o[1], -0.585f, 1e-6f) && near(o[2], 0.2f, 1e-6f), "tv shape: each axis takes its own scale");
++}
++
++static void scale_setting_is_parsed(void) {
++    float k[3] = {1, 1, 1};
++    CHECK(motion_scale_parse("0.7", k) && near(k[0], 0.7f, 1e-6f) && near(k[1], 0.7f, 1e-6f) && near(k[2], 0.7f, 1e-6f), "tv scale: one number scales every axis");
++    CHECK(motion_scale_parse("1.18,1.17,1.0", k) && near(k[0], 1.18f, 1e-6f) && near(k[1], 1.17f, 1e-6f) && near(k[2], 1.0f, 1e-6f), "tv scale: three numbers, x, y, z");
++    float kept[3] = {1, 1, 1};
++    CHECK(!motion_scale_parse("1.2,abc", kept) && kept[0] == 1 && kept[1] == 1 && kept[2] == 1, "tv scale: a malformed setting changes nothing");
++    CHECK(!motion_scale_parse("1,0,1", kept) && kept[1] == 1, "tv scale: a zero or negative axis is refused");
++    CHECK(!motion_scale_parse("1,1", kept), "tv scale: two numbers are refused");
++}
++
++static void smoothing_follows_a_step_gradually(void) {
++    motion_smooth s; motion_smooth_reset(&s);
++    float zero[3] = {0, 0, 0}, step[3] = {1, 0, 0}, o[3];
++    motion_smooth_apply(&s, unit_scale, 0.05f, zero, 0, o);
++    motion_smooth_apply(&s, unit_scale, 0.05f, step, 0.05f, o);
++    CHECK(near(o[0], 0.5f, 1e-5f), "tv shape: one time constant in, half of a step (dt / (tau + dt))");
++    for (int i = 0; i < 40; i++) motion_smooth_apply(&s, unit_scale, 0.05f, step, 1 / 30.f, o);
++    CHECK(near(o[0], 1.0f, 1e-3f), "tv shape: a held rate is reached");
++    CHECK(o[1] == 0 && o[2] == 0, "tv shape: the other axes stay still");
++}
++
++static void first_sample_is_taken_as_it_is(void) {
++    motion_smooth s; motion_smooth_reset(&s);
++    float w[3] = {0.3f, 0, 0}, o[3];
++    motion_smooth_apply(&s, unit_scale, 0.05f, w, 0, o);
++    CHECK(near(o[0], 0.3f, 1e-6f), "tv shape: a stream's first sample is not pulled toward zero");
++}
++
++int main(void) {
++    pro_controller_offset_is_learned();
++    turning_controller_learns_nothing();
++    neutral_shaping_passes_the_rate();
++    scale_applies_per_axis();
++    scale_setting_is_parsed();
++    smoothing_follows_a_step_gradually();
++    first_sample_is_taken_as_it_is();
++    printf("t_motion_rest_tv: %d checks, %d failed\n", checks, fails);
++    return fails != 0;
++}
+diff --git a/dm/ios/project_tv.yml b/dm/ios/project_tv.yml
+index 87cb9ac..6ff54a9 100644
+--- a/dm/ios/project_tv.yml
++++ b/dm/ios/project_tv.yml
+@@ -66,7 +66,7 @@ targets:
+       TARGETED_DEVICE_FAMILY: "3"
+       ENABLE_BITCODE: NO
+       GCC_C_LANGUAGE_STANDARD: gnu11
+-      OTHER_CFLAGS: $(inherited) -mcpu=apple-m1
++      OTHER_CFLAGS: $(inherited) -mcpu=apple-m1 -DMOTION_REST_FIRST_MAX=0.35f
+       CLANG_ENABLE_OBJC_ARC: YES
+       DEBUG_INFORMATION_FORMAT: dwarf
+       GCC_WARN_INHIBIT_ALL_WARNINGS: YES
