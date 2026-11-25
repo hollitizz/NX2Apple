@@ -25,7 +25,7 @@ package struct InstallCard: View {
     }
 
     package var body: some View {
-        if build.target != BuildTarget.mac || forQueue, !build.running || sending || showLocked { card.disabled(build.running && !sending) }
+        if build.target == BuildTarget.ios || forQueue, !build.running || sending || showLocked { card.disabled(build.running && !sending) }
     }
 
     /// The copy of the game data runs on the build store's `running` flag too, and its own buttons must stay usable (Stop).
@@ -139,14 +139,14 @@ package struct InstallCard: View {
                         HStack {
                             Text(loc.t("flow.chooseDevice")).font(.manrope(16, .semibold))
                             Spacer()
-                            RefreshDevicesButton(devices: devices)
+                            RefreshDevicesButton(checked: devices.checked) { _ = devices.refresh() }
                         }
                         if devices.checked && devices.devices.isEmpty {
                             VStack(spacing: 12) {
                                 Image(systemName: "iphone.and.ipad").font(.system(size: 28)).accessibilityHidden(true)
                                 Text(loc.t("flow.pairDevice")).font(DS.Font.body)
-                                Button(loc.t("flow.openXcode")) { openXcode() }
-                                    .padTarget("set.build.install.xcode", scope: "main", activate: { openXcode() })
+                                Button(loc.t("flow.openXcode")) { XcodeLauncher.open() }
+                                    .padTarget("set.build.install.xcode", scope: "main", activate: { XcodeLauncher.open() })
                             }.frame(maxWidth: .infinity).padding(20).accessibilityHint(loc.t("dev.noDevices"))
                         } else {
                             LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
@@ -300,14 +300,8 @@ package struct InstallCard: View {
                        activate: { if !build.running && !blocked { pickKind(kind) } })
     }
 
-    private func openXcode() {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.dt.Xcode") { NSWorkspace.shared.open(url) }
-    }
-
     private func stepTeam(_ by: Int, options: [(value: String, label: String)]) {
-        guard !build.running, !options.isEmpty else { return }
-        let index = options.firstIndex { $0.value == devices.signingTeam } ?? 0
-        devices.signingTeam = options[(index + by + options.count) % options.count].value
+        if !build.running { devices.stepSigningTeam(by, options: options) }
     }
 
     private func stepFrameworkTeam(_ by: Int, options: [(value: String, label: String)], current: String) {

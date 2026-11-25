@@ -348,6 +348,10 @@ extension LauncherView {
 
     /// Adds games to the build queue with the Builds page's target, upstream, and iOS delivery settings (#1112).
     func enqueueBuilds(_ games: [LibraryGame]) {
+        if let blocked = m.appleTVQueueBlock {
+            m.note(blocked)
+            return
+        }
         let batch = UUID()
         let upstream = m.buildUpstream
         let selectedTarget = m.isMacOnlyUpstreamSelected ? BuildTarget.mac : BuildTarget.normalized(m.target)

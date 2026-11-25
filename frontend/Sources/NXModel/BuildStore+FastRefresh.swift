@@ -137,7 +137,7 @@ extension BuildStore {
         fastRefreshBaseDir = resolvedOutDir
         fastRefreshGameName = (gameName?.isEmpty == false) ? gameName : nil
         fastRefreshExternalImgPath = nil
-        self.target = BuildTarget.normalized(targetName)
+        applyQueuedTarget(BuildTarget.normalized(targetName))
         runningTarget = self.target
 
         let isMac = self.target == BuildTarget.mac

@@ -170,6 +170,12 @@ package struct BuildFailureCard: View {
                 if m.installedXcode != nil { fix(kind, "fail.openXcode") }
             case .deviceTransfer, .devicePairing, .developerMode:
                 fix(kind, "fail.retry")
+            case .appleTVSigning:
+                if let workspace = m.failure?.detail {
+                    Button(loc.t("tv.openProject")) { NSWorkspace.shared.open(URL(fileURLWithPath: workspace)) }.disabled(m.running)
+                        .padTarget("set.build.failure.tvProject", scope: "main", enabled: !m.running) { NSWorkspace.shared.open(URL(fileURLWithPath: workspace)) }
+                }
+                fix(kind, "fail.retry")
             case .shellDataIncomplete:
                 fix(kind, "shell.retry")
                 if m.finderArchive != nil {

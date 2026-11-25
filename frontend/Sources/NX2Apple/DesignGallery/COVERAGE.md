@@ -4,15 +4,16 @@ Written by `GalleryCoverageTests` from `GalleryCoverage.swift`: every View type 
 popover and alert, every notice and every case of the state enums the views switch on, with the gallery's scenes
 (`GalleryScene.id`) that show it, or the reason none can. After a change:
 `NX_WRITE_COVERAGE=1 swift test --package-path frontend --filter GalleryCoverageTests`. The gallery has
-342 scenes.
+344 scenes.
 
-## Views: 234 of 244 in a scene
+## Views: 235 of 245 in a scene
 
 | View | Scenes |
 |---|---|
 | `ActionCard` | `addGameFound` |
 | `ActivityLogSheet` | `activityLog`, `activityLogEmpty` |
 | `AppCard` | `settings`, `desktop-appAvailable` |
+| `AppleTVCard` | `wizardAppleTV` |
 | `ArtworkFill` | `libraryGames`, `consoleHome` |
 | `ArtworkOutcomeBadge` | `desktop-queueEveryState` |
 | `ArtworkPanel` | `desktop-artworkHero`, `desktop-artworkThumbnail` |
@@ -225,7 +226,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `ProgressCard` | `buildsRunning`, `nxkitFailed` |
 | `QueueArtworkStack` | `desktop-queueRunning`, `buildsQueued` |
 | `RefreshCompletionSheet` | `refreshCompletion` |
-| `RefreshDevicesButton` | `wizardInstall` |
+| `RefreshDevicesButton` | `wizardInstall`, `wizardAppleTV` |
 | `RenameGameSheet` | `rename` |
 | `RootView` | Reason: The app's roots: they choose the onboarding, the launcher or the console demo, whose scenes show what they draw. |
 | `SaveImportSheet` | `saveImport` |
@@ -314,7 +315,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `hero.switch2` | `librarySwitch2` |
 | `library.skippedBanner` | `libraryNoticeWarning` |
 
-## States: 285 of 285 in a scene
+## States: 286 of 286 in a scene
 
 | State | Scenes |
 |---|---|
@@ -390,6 +391,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `BuildFailureKind.devicePairing` | `buildFailure-devicePairing` |
 | `BuildFailureKind.developerMode` | `buildFailure-developerMode` |
 | `BuildFailureKind.shellDataIncomplete` | `buildFailure-shellDataIncomplete` |
+| `BuildFailureKind.appleTVSigning` | `buildFailure-appleTVSigning` |
 | `BuildFailureKind.engineOffline` | `buildFailure-engineOffline` |
 | `BuildFailureKind.engineSync` | `buildFailure-engineSync` |
 | `BuildFailureKind.nxkit` | `buildFailure-nxkit` |

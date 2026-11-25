@@ -38,6 +38,10 @@ import NXCore
     func copyEnded()
     /// Reads the device listing again (a transfer asks it when a send failed, to tell a device that went away from a refusal).
     func refreshDevices() async
+    var appleTVs: [AppleDevice] { get }
+    var appleTVDevice: String { get }
+    var tvOSSDKReady: Bool? { get }
+    func refreshAppleTVs() -> Task<Void, Never>
 }
 
 extension InstallTarget {
@@ -65,6 +69,10 @@ extension InstallTarget {
     }
     package func cancelCopy() {}
     package func refreshDevices() async {}
+    package var appleTVs: [AppleDevice] { [] }
+    package var appleTVDevice: String { "" }
+    package var tvOSSDKReady: Bool? { nil }
+    package func refreshAppleTVs() -> Task<Void, Never> { Task {} }
 }
 
 extension DeviceStore: InstallTarget {
@@ -75,10 +83,11 @@ extension BuildStore {
     // MARK: Installing on a device
 
     /// The installer with this store's tools, log, stages and process hand-off wired in. The install and the export (BuildStore+Export.swift) share it.
-    func makeInstaller(respectSkipMode: Bool = true) -> ShellInstaller {
+    func makeInstaller(respectSkipMode: Bool = true, device: String? = nil) -> ShellInstaller {
         let python = resolveBuildPython()
-        var installer = ShellInstaller(xcrun: devices.xcrun, repo: repo.path, python: python, root: shellRoot, device: devices.installDevice, team: devices.signingTeam)
-        installer.deviceName = devices.deviceName(devices.installDevice)
+        let deviceID = device ?? devices.installDevice
+        var installer = ShellInstaller(xcrun: devices.xcrun, repo: repo.path, python: python, root: shellRoot, device: deviceID, team: devices.signingTeam)
+        installer.deviceName = devices.deviceName(deviceID)
         installer.defaults = defaults
         installer.lang = localizer.lang
         installer.ownGroup = true
@@ -93,11 +102,12 @@ extension BuildStore {
             case ShellInstaller.checkStageID: "shell.checkStage"
             case ShellInstaller.exportBuildStageID: "shell.exportBuildStage"
             case ShellInstaller.exportPackStageID: "shell.exportPackStage"
+            case ShellInstaller.appleTVSettingsStageID: "tv.settingsStage"
             default: nil
             }
             let usesDeviceArg = s.id == ShellInstaller.signStageID || s.id == ShellInstaller.installStageID
                 || s.id == ShellInstaller.copyStageID || s.id == ShellInstaller.checkStageID
-            let nameArgument = usesDeviceArg ? self.devices.deviceName(self.devices.installDevice) : nil
+            let nameArgument = usesDeviceArg ? self.devices.deviceName(deviceID) : nil
             if let i = self.stages.firstIndex(where: { $0.id == s.id }) {
                 self.stages[i].name = s.name; self.stages[i].state = s.state; self.stages[i].detail = s.detail
                 self.stages[i].nameKey = nameKey; self.stages[i].nameArgument = nameKey == nil ? nil : nameArgument

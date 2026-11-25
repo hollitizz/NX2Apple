@@ -274,7 +274,7 @@ extension BuildStore {
             chooseBuildFolder()
         case .teamTaken, .noSigningAccount, .freeAccountLimit, .appIDLimit:
             openXcode()
-        case .deviceTransfer, .devicePairing, .developerMode:
+        case .deviceTransfer, .devicePairing, .developerMode, .appleTVSigning:
             retryShellInstall()
         case .shellDataIncomplete:
             retryShellData()

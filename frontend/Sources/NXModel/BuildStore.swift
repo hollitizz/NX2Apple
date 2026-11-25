@@ -117,6 +117,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
             if !running, oldValue {
                 applyPendingNxkitSwitch()   // an nxkit update waits for the build (BuildStore+Nxkit.swift)
                 enforceUpstreamForCurrentGame()
+                scheduleAppleTVTargetRestore()
             }
         }
     }
@@ -333,6 +334,8 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     var shellRetry: (framework: String, titleID: String, name: String, archive: String)?
     var shellBatchRetry: [DeferredShellGame]?
     var shellDeviceChecked = false
+    var appleTVDeviceChecked = false
+    var borrowedTarget: String?
     package let driveCancel = LockedFlag()   // Stop of the copy to a drive (BuildStore+Send.swift)
     @Published package var shellMove: CacheMove = .idle   // Move cache folder (BuildStore+ShellRoot.swift, #427)
     @Published package var nxkitMove: CacheMove = .idle   // the nxkit work folder and the build seeds (BuildStore+CacheFolders.swift)
@@ -393,6 +396,9 @@ func hop(_ body: @escaping @MainActor () -> Void) {
             if queueBlocksMNG != blocksMNG { queueBlocksMNG = blocksMNG }
             enforceUpstreamForCurrentGame()
             refreshQueueSeenShadersEligibility(entries: queue?.entries ?? [])
+            queueActiveSubscription = queue?.$active.sink { [weak self] active in
+                if !active { self?.scheduleAppleTVTargetRestore() }
+            }
             queueSubscription = queue?.$entries.sink { [weak self] entries in
                 guard let self else { return }
                 let queuedEntries = entries.filter { $0.status == .queued }
@@ -415,6 +421,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
         PackageHeaderTitleID.readHex16(path: $0, keysPath: $1)
     }
     private var queueSubscription: AnyCancellable?
+    private var queueActiveSubscription: AnyCancellable?
     /// The running send of each transfer asks this flag whether it was cancelled.
     var transferCancels: [UUID: LockedFlag] = [:]
     package var deferShellPackaging = false
@@ -559,12 +566,12 @@ func hop(_ body: @escaping @MainActor () -> Void) {
 
     /// This iPhone build goes straight to a device.
     /// An iPhone or iPad build that makes the shared app as an unsigned IPA (#416): no device, no team.
-    package var exportsShell: Bool { target != BuildTarget.mac && (buildUpstream.buildsIOSStandaloneOnly || (queuedExportIPA ?? devices.exportIPA)) }
+    package var exportsShell: Bool { target == BuildTarget.ios && (buildUpstream.buildsIOSStandaloneOnly || (queuedExportIPA ?? devices.exportIPA)) }
     /// An export of one game's own IPA with the game data inside (#540): the engine's one-game app, no shared app, nothing to send.
-    package var exportsOneGame: Bool { target != BuildTarget.mac && (buildUpstream.buildsIOSStandaloneOnly || (exportsShell && (queuedExportOneGame ?? devices.exportOneGame))) }
+    package var exportsOneGame: Bool { target == BuildTarget.ios && (buildUpstream.buildsIOSStandaloneOnly || (exportsShell && (queuedExportOneGame ?? devices.exportOneGame))) }
     /// An export of a standalone `.framework` for the shared app: no shell IPA build or repack, game data still sent separately.
     package var exportsFramework: Bool { exportsShell && !exportsOneGame && (queuedExportFramework ?? devices.exportFramework) }
-    package var installsDirectly: Bool { target != BuildTarget.mac && !devices.installDevice.isEmpty && !devices.signingTeam.isEmpty }
+    package var installsDirectly: Bool { target == BuildTarget.ios && !devices.installDevice.isEmpty && !devices.signingTeam.isEmpty }
 
     /// Home shown as ~ (shorter in a one-line row, and it keeps the account name out of screenshots).
     package func shortPath(_ path: String) -> String { RepoLayout.shortPath(path) }

@@ -2,7 +2,7 @@ import SwiftUI
 import NXCore
 import NXModel
 
-/// Mac or iPhone, and for the iPhone the switch that decodes textures on the CPU. Observes the build store only.
+/// Mac, iPhone or Apple TV, and for the iPhone and the Apple TV the switch that decodes textures on the CPU. Observes the build store only.
 package struct TargetCard: View {
     @ObservedObject var build: BuildStore
     @EnvironmentObject var loc: Localizer
@@ -10,13 +10,16 @@ package struct TargetCard: View {
 
     package init(build: BuildStore) { self.build = build }
 
+    private var macOnlyBlockedNote: String? { build.isMacOnlyUpstreamSelected ? build.macOnlyNoteKey : nil }
+
     package var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(loc.t("section.target")).font(titleFont).foregroundStyle(LauncherPalette.secondaryText)
                 .padding(.leading, 2)
             HStack(spacing: 14) {
-                targetCard(BuildTarget.mac, symbol: "desktopcomputer", title: "build.mac", note: "build.macNote")
-                targetCard(BuildTarget.ios, symbol: "iphone", title: "build.ios", note: "build.iosNote")
+                targetCard(BuildTarget.mac, symbol: "desktopcomputer", title: "build.mac", note: "build.macNote", blockedNote: nil)
+                targetCard(BuildTarget.ios, symbol: "iphone", title: "build.ios", note: "build.iosNote", blockedNote: macOnlyBlockedNote)
+                targetCard(BuildTarget.tvos, symbol: "appletv", title: "build.tv", note: "build.tvNote", blockedNote: macOnlyBlockedNote)
             }
             // A Switch 2 game (#445): how far the engine's support goes, for the chosen target. Nothing is blocked: the engine
             // builds both, and one Switch 2 game ran on an iPhone, but no target is tested for every game.
@@ -95,17 +98,17 @@ package struct TargetCard: View {
         .onChange(of: build.buildUpstream) { _ in build.refreshSeenShadersInfo() }
     }
 
-    private func targetCard(_ value: String, symbol: String, title: String, note: String) -> some View {
-        let macOnlyBlocked = value == BuildTarget.ios && build.isMacOnlyUpstreamSelected
-        let selected = build.target == value && !macOnlyBlocked
-        let displayNote = macOnlyBlocked ? build.macOnlyNoteKey : note
+    private func targetCard(_ value: String, symbol: String, title: String, note: String, blockedNote: String?) -> some View {
+        let blocked = blockedNote != nil
+        let selected = build.target == value && !blocked
+        let displayNote = blockedNote ?? note
         return Button { build.target = value } label: {
             LauncherTargetOptionLabel(title: loc.t(title), symbol: symbol, note: loc.t(displayNote), selected: selected)
         }
-        .buttonStyle(.plain).disabled(build.running || macOnlyBlocked)
-        .opacity(macOnlyBlocked ? 0.5 : 1)
+        .buttonStyle(.plain).disabled(build.running || blocked)
+        .opacity(blocked ? 0.5 : 1)
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .padTarget("set.build.target." + value, scope: "main", radius: 14, enabled: !build.running && !macOnlyBlocked) { if !build.running && !macOnlyBlocked { build.target = value } }
+        .padTarget("set.build.target." + value, scope: "main", radius: 14, enabled: !build.running && !blocked) { if !build.running && !blocked { build.target = value } }
     }
 }
 

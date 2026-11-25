@@ -146,6 +146,10 @@ import NXLauncher
             configureBuild(stores, library: library)
             stores.build.target = BuildTarget.ios
             root = AnyView(launcher(.builds, editor: true, step: scene == .wizardPlatform ? 1 : 2))
+        case .wizardAppleTV:
+            configureBuild(stores, library: library)
+            stores.build.target = BuildTarget.tvos
+            root = AnyView(launcher(.builds, editor: true, step: 2))
         case .buildsIdle:
             root = AnyView(launcher(.builds))
         case .buildsRunning, .buildsQueued:
@@ -293,6 +297,7 @@ import NXLauncher
         case .driveMissing: return "Games"
         case .noTitleID: return "/Volumes/Games/Unknown"
         case .nxkit: return "3"
+        case .appleTVSigning: return "/Volumes/Games/0100000000001000_build/AppleTV.xcworkspace"
         default: return nil
         }
     }

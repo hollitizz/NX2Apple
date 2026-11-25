@@ -122,6 +122,12 @@ package enum BuildPlan {
         return .nvn(hasGLSLCCapture: false)
     }
 
+    private static func deviceStage(id: Int, key: String, device: String, localizedName: (String) -> String) -> Stage {
+        let format = localizedName(key)
+        return Stage(id: id, name: device.isEmpty ? format : String(format: format, device), state: .pending,
+                     nameKey: key, nameArgument: device.isEmpty ? nil : device)
+    }
+
     /// Initial full list of `.pending` stages before the build process begins printing lines.
     package static func initialStages(
         for input: BuildPlanInput,
@@ -129,6 +135,7 @@ package enum BuildPlan {
         fileManager fm: FileManager = .default
     ) -> [Stage] {
         let isMac = BuildTarget.normalized(input.target) == BuildTarget.mac
+        let isAppleTV = input.target == BuildTarget.tvos
         var scriptNames: [String] = []
 
         switch input.upstream {
@@ -187,6 +194,8 @@ package enum BuildPlan {
             if isMac {
                 scriptNames.append("Mac host")
                 scriptNames.append("Mac app")
+            } else if isAppleTV {
+                scriptNames.append("prepare Xcode")
             } else if input.exportsOneGame {
                 scriptNames.append("app build")
                 scriptNames.append("IPA pack")
@@ -203,6 +212,9 @@ package enum BuildPlan {
             if input.preflightEnabled {
                 stages.append(Stage(id: 1000, name: "preflight", state: .pending, nameKey: "stage.preflight"))
             }
+        } else if isAppleTV {
+            stages.append(deviceStage(id: ShellInstaller.signStageID, key: "dev.signStage", device: input.deviceName, localizedName: localizedName))
+            stages.append(deviceStage(id: ShellInstaller.installStageID, key: "dev.installStage", device: input.deviceName, localizedName: localizedName))
         } else if !input.exportsOneGame && !input.exportsFramework {
             let dev = input.deviceName
             if input.exportsShell {
@@ -213,21 +225,13 @@ package enum BuildPlan {
                 stages.append(Stage(id: ShellInstaller.exportPackStageID, name: localizedName("shell.exportPackStage"), state: .pending,
                                     nameKey: "shell.exportPackStage"))
             } else {
-                func fmt(_ key: String) -> String {
-                    let f = localizedName(key)
-                    return dev.isEmpty ? f : String(format: f, dev)
-                }
                 stages.append(Stage(id: ShellInstaller.projectStageID, name: localizedName("shell.projectStage"), state: .pending,
                                     nameKey: "shell.projectStage"))
-                stages.append(Stage(id: ShellInstaller.signStageID, name: fmt("dev.signStage"), state: .pending,
-                                    nameKey: "dev.signStage", nameArgument: dev.isEmpty ? nil : dev))
-                stages.append(Stage(id: ShellInstaller.installStageID, name: fmt("dev.installStage"), state: .pending,
-                                    nameKey: "dev.installStage", nameArgument: dev.isEmpty ? nil : dev))
-                stages.append(Stage(id: ShellInstaller.checkStageID, name: fmt("shell.checkStage"), state: .pending,
-                                    nameKey: "shell.checkStage", nameArgument: dev.isEmpty ? nil : dev))
+                stages.append(deviceStage(id: ShellInstaller.signStageID, key: "dev.signStage", device: dev, localizedName: localizedName))
+                stages.append(deviceStage(id: ShellInstaller.installStageID, key: "dev.installStage", device: dev, localizedName: localizedName))
+                stages.append(deviceStage(id: ShellInstaller.checkStageID, key: "shell.checkStage", device: dev, localizedName: localizedName))
                 if input.includeDeviceCopyStage {
-                    stages.append(Stage(id: ShellInstaller.copyStageID, name: fmt("dev.copyStage"), state: .pending,
-                                        nameKey: "dev.copyStage", nameArgument: dev.isEmpty ? nil : dev))
+                    stages.append(deviceStage(id: ShellInstaller.copyStageID, key: "dev.copyStage", device: dev, localizedName: localizedName))
                 }
             }
         }

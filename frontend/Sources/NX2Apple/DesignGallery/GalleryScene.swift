@@ -12,7 +12,7 @@ enum GalleryScene: Hashable, Identifiable, CaseIterable {
     // A game's launch options
     case gameOptions
     // Builds and the build wizard
-    case addGame, gamePage, wizardPlatform, wizardInstall, buildsIdle, buildsRunning, buildsQueued, buildsSetupHint, buildFailed
+    case addGame, gamePage, wizardPlatform, wizardInstall, wizardAppleTV, buildsIdle, buildsRunning, buildsQueued, buildsSetupHint, buildFailed
     case addGameFound, addGamePartial, buildOneStage, buildMultiStage, buildFinishedMac, buildFinishedIOS
     case buildFailure(BuildFailureKind)
     // Settings
@@ -65,7 +65,7 @@ enum GalleryScene: Hashable, Identifiable, CaseIterable {
         [.libraryGames, .libraryFew, .libraryEmpty, .libraryNarrow,
          .libraryEngineSyncing, .libraryEngineUpdate, .libraryNoticeWarning, .libraryNoticeError, .librarySwitch2, .libraryGatekeeper,
          .allGames, .allGamesSearch, .allGamesNoResults, .gameOptions,
-         .addGame, .addGameFound, .addGamePartial, .gamePage, .wizardPlatform, .wizardInstall, .buildsIdle, .buildsRunning,
+         .addGame, .addGameFound, .addGamePartial, .gamePage, .wizardPlatform, .wizardInstall, .wizardAppleTV, .buildsIdle, .buildsRunning,
          .buildOneStage, .buildMultiStage, .buildsQueued, .buildFinishedMac, .buildFinishedIOS, .buildsSetupHint, .buildFailed]
         + BuildFailureKind.allCases.filter { $0 != .diskFull }.map(GalleryScene.buildFailure)
         + [.settings, .settingsLibrary, .settingsControls, .settingsTools, .settingsEngineError]
@@ -99,7 +99,7 @@ enum GalleryScene: Hashable, Identifiable, CaseIterable {
              .libraryNoticeWarning, .libraryNoticeError, .librarySwitch2, .libraryGatekeeper: return .library
         case .allGames, .allGamesSearch, .allGamesNoResults: return .allGames
         case .gameOptions: return .gameOptions
-        case .addGame, .gamePage, .wizardPlatform, .wizardInstall, .buildsIdle, .buildsRunning, .buildsQueued, .buildsSetupHint,
+        case .addGame, .gamePage, .wizardPlatform, .wizardInstall, .wizardAppleTV, .buildsIdle, .buildsRunning, .buildsQueued, .buildsSetupHint,
              .addGameFound, .addGamePartial, .buildOneStage, .buildMultiStage, .buildFinishedMac, .buildFinishedIOS: return .builds
         case .buildFailed, .buildFailure: return .failures
         case .settings, .settingsLibrary, .settingsControls, .settingsTools, .settingsEngineError: return .settings
@@ -140,6 +140,7 @@ enum GalleryScene: Hashable, Identifiable, CaseIterable {
         case .gamePage: return "Wizard: game files"
         case .wizardPlatform: return "Wizard: platform"
         case .wizardInstall: return "Wizard: install"
+        case .wizardAppleTV: return "Wizard: Apple TV"
         case .buildsIdle: return "Builds"
         case .buildsRunning: return "Build running, footer"
         case .buildsQueued: return "Several queued"

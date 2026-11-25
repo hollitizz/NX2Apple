@@ -12,6 +12,7 @@ final class FakeProcessRunner: ProcessRunner, @unchecked Sendable {
     var streamOK = true
     /// The exit status of `streamLines`. nil: it fails to start.
     var lineStatus: Int32? = 0
+    var onStreamLines: ((ProcessLaunch) -> Void)?
     /// What `start` reports: the output chunks, then the exit status. nil: it fails to start.
     var startOutput: [String]? = []
     var startStatus: Int32 = 0
@@ -32,6 +33,7 @@ final class FakeProcessRunner: ProcessRunner, @unchecked Sendable {
 
     func streamLines(_ launch: ProcessLaunch, started: @escaping (RunningProcess) -> Void, line: @escaping (String) -> Void) -> ProcessResult {
         record(launch)
+        onStreamLines?(launch)
         guard let status = lineStatus else { return .failedToStart("could not start") }
         started(FakeRunningProcess())
         lines.forEach(line)
