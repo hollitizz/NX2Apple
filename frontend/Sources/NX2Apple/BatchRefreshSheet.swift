@@ -612,11 +612,13 @@ struct BatchRefreshSheet: View {
         .padTarget(id, scope: "batchRefresh", enabled: !disabled, activate: action)
     }
 
+    private var queueBlock: String? { stores.build.appleTVQueueBlock }
+
     private var footerSection: some View {
-        let summaryText = Text(String(format: loc.t("batchRefresh.summary"), selectedFastCount, selectedFullCount))
+        let summaryText = Text(queueBlock ?? String(format: loc.t("batchRefresh.summary"), selectedFastCount, selectedFullCount))
             .font(DS.Font.callout)
-            .foregroundStyle(DS.Color.textSecondary)
-            .lineLimit(1)
+            .foregroundStyle(queueBlock == nil ? DS.Color.textSecondary : LauncherPalette.building)
+            .lineLimit(queueBlock == nil ? 1 : 2)
 
         return ViewThatFits(in: .horizontal) {
             DSSheetButtonRow { summaryText } buttons: { footerButtons }
@@ -642,8 +644,8 @@ struct BatchRefreshSheet: View {
                 confirm(onlyFast: true)
             }
             .buttonStyle(DSSecondaryButtonStyle())
-            .disabled(selectedFastCount == 0)
-            .padTarget("batchRefresh.onlyFast", scope: "batchRefresh", enabled: selectedFastCount > 0) {
+            .disabled(selectedFastCount == 0 || queueBlock != nil)
+            .padTarget("batchRefresh.onlyFast", scope: "batchRefresh", enabled: selectedFastCount > 0 && queueBlock == nil) {
                 confirm(onlyFast: true)
             }
             }
@@ -651,8 +653,8 @@ struct BatchRefreshSheet: View {
             DSSheetPrimaryButton(String(format: loc.t("batchRefresh.allSelected"), totalSelectedCount)) {
                 confirm(onlyFast: false)
             }
-            .disabled(totalSelectedCount == 0)
-            .padTarget("batchRefresh.confirm", scope: "batchRefresh", enabled: totalSelectedCount > 0) {
+            .disabled(totalSelectedCount == 0 || queueBlock != nil)
+            .padTarget("batchRefresh.confirm", scope: "batchRefresh", enabled: totalSelectedCount > 0 && queueBlock == nil) {
                 confirm(onlyFast: false)
             }
         }
@@ -726,7 +728,7 @@ struct BatchRefreshSheet: View {
 
     private func confirm(onlyFast: Bool) {
         let chosen = onlyFast ? plannedItems.filter(\.isPureFast) : plannedItems
-        guard !chosen.isEmpty else { return }
+        guard !chosen.isEmpty, queueBlock == nil else { return }
         let batch = UUID()
         let rawEntries = chosen.map { item in
             RefreshQueueBuilder.makeEntry(

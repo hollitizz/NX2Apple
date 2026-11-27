@@ -58,7 +58,7 @@ extension BuildStore {
                 )
             }
         }
-        if target != BuildTarget.mac, !exportsOneGame, !exportsFramework {
+        if target == BuildTarget.ios, !exportsOneGame, !exportsFramework {
             let root = shellRoot
             if !root.isEmpty,
                !folder.isEmpty,
@@ -93,7 +93,8 @@ extension BuildStore {
             if !repo.path.isEmpty { return EngineLayout.root(repo.path) }
             return ""
         }()
-        let deviceName = devices.installDevice.isEmpty ? "" : devices.deviceName(devices.installDevice)
+        let device = target == BuildTarget.tvos ? devices.appleTVDevice : devices.installDevice
+        let deviceName = device.isEmpty ? "" : devices.deviceName(device)
         let input = BuildPlanInput(
             upstream: activeBuildUpstream,
             target: target,

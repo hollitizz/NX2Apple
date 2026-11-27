@@ -8,6 +8,17 @@ package enum SendWhere {
     package static let drive = "drive"
 }
 
+struct AppleTVLookup: Sendable {
+    let list: @Sendable (_ xcrun: String) -> [AppleDevice]
+    let probeSDK: @Sendable (_ xcrun: String) -> Bool
+
+    static func make(runner: ProcessRunner, list: (@Sendable (String) -> [AppleDevice])?,
+                     probeSDK: (@Sendable (String) -> Bool)?) -> AppleTVLookup {
+        AppleTVLookup(list: list ?? { DeviceTools.devices(xcrun: $0, runner: runner, platform: .tvOS) },
+                      probeSDK: probeSDK ?? { AppleTVBuild.sdkAvailable(xcrun: $0, runner: runner) })
+    }
+}
+
 /// The devices (LNPANDY/NX2Apple#387, step 7): the iPhones and iPads paired with this Mac, the teams it can sign for, the device and
 /// the team the player chose to install on, and the copy flow of the shared app (the question before the game data goes over, and
 /// the wait for a cable). It follows `AppUpdateStore` (`frontend/ARCHITECTURE.md`, "Stores").
@@ -31,6 +42,7 @@ package enum SendWhere {
     nonisolated package static let sendWhereKey = "sendWhere"
     nonisolated package static let driveFolderKey = "driveFolder"
     nonisolated package static let postBuildTransferModeKey = "postBuildTransferMode"
+    nonisolated package static let appleTVKey = "appleTVDevice"
 
     @Published package var devices: [AppleDevice] = []
     @Published package var teams: [SigningTeam] = []
@@ -38,6 +50,12 @@ package enum SendWhere {
     @Published package private(set) var usbLinkSpeeds: [String: Int64] = [:]
     /// The listing ran at least once, so the picker shows its spinner until then and "no devices" after.
     @Published package var checked = false
+    @Published package private(set) var appleTVs: [AppleDevice] = []
+    @Published package private(set) var appleTVsChecked = false
+    @Published package private(set) var tvOSSDKReady: Bool?
+    @Published package var appleTVDevice: String {
+        didSet { defaults.set(appleTVDevice, forKey: Self.appleTVKey) }
+    }
     /// The UDID of the device a build is installed on. Empty: the build stays an IPA. Saved when it changes.
     @Published package var installDevice: String {
         didSet { defaults.set(installDevice, forKey: Self.deviceKey) }
@@ -107,10 +125,13 @@ package enum SendWhere {
 
     private let defaults: UserDefaults
     private let listDevices: @Sendable (_ xcrun: String) -> [AppleDevice]
+    private let appleTVLookup: AppleTVLookup
     private var copyAnswer: ((ShellCopyDecision) -> Void)?
     private let waitCancel = LockedFlag()
     private let transferModeBox = LockedTransferMode()
     private var refreshGeneration = 0
+    private var appleTVGeneration = 0
+    private var latestAppleTVRefresh: Task<Void, Never>?
     internal var frameworkProbeGeneration: UInt64 = 0
 
     /// - Parameters:
@@ -121,10 +142,13 @@ package enum SendWhere {
                  listDevices: (@Sendable (String) -> [AppleDevice])? = nil,
                  readTeams: (@Sendable () -> [SigningTeam])? = nil,
                  usbSpeedLookup: (@Sendable (String) -> Int64?)? = nil,
-                 discoverDeviceFrameworks: (@Sendable (String, String, String) -> DeviceFrameworkDiscoveryResult)? = nil) {
+                 discoverDeviceFrameworks: (@Sendable (String, String, String) -> DeviceFrameworkDiscoveryResult)? = nil,
+                 listAppleTVs: (@Sendable (String) -> [AppleDevice])? = nil,
+                 probeTVOSSDK: (@Sendable (String) -> Bool)? = nil) {
         self.xcrun = xcrun
         self.defaults = defaults
         self.listDevices = listDevices ?? { DeviceTools.devices(xcrun: $0, runner: runner) }
+        self.appleTVLookup = AppleTVLookup.make(runner: runner, list: listAppleTVs, probeSDK: probeTVOSSDK)
         self.readTeams = readTeams ?? { DeviceTools.teams(runner: runner) }
         self.usbSpeedLookup = usbSpeedLookup ?? { USBLinkSpeed.linkSpeedBps(forUDID: $0) }
         self.discoverDeviceFrameworks = discoverDeviceFrameworks ?? { udid, name, preferredBundleID in
@@ -138,6 +162,7 @@ package enum SendWhere {
         }
         self.installDevice = defaults.string(forKey: Self.deviceKey) ?? ""
         self.signingTeam = defaults.string(forKey: Self.teamKey) ?? ""
+        self.appleTVDevice = defaults.string(forKey: Self.appleTVKey) ?? ""
         self.exportIPA = defaults.bool(forKey: Self.exportKey)
         let savedOneGame = defaults.bool(forKey: Self.oneGameKey)
         self.exportOneGame = savedOneGame
@@ -168,7 +193,22 @@ package enum SendWhere {
     }
 
     /// A device's name for a message, "iPhone" when this Mac has not listed it.
-    package func deviceName(_ udid: String) -> String { devices.first { $0.id == udid }?.name ?? "iPhone" }
+    package func deviceName(_ udid: String) -> String { (devices + appleTVs).first { $0.id == udid }?.name ?? "iPhone" }
+
+    nonisolated private static func isValidTeamID(_ id: String) -> Bool {
+        id.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil
+    }
+
+    private func applyTeams(_ teams: [SigningTeam]) {
+        self.teams = teams
+        if teams.isEmpty {
+            if !signingTeam.isEmpty && !Self.isValidTeamID(signingTeam) {
+                signingTeam = ""
+            }
+        } else if !teams.contains(where: { $0.id == signingTeam }) {
+            signingTeam = teams[0].id
+        }
+    }
 
     /// The paired devices and the signing teams, read in the background (devicectl can take a few seconds). A team that is no longer
     /// known is replaced by the first one, while a transient empty team list preserves a valid saved team ID.
@@ -191,20 +231,36 @@ package enum SendWhere {
             guard self.refreshGeneration == generation else { return }
             self.devices = devices
             self.usbLinkSpeeds = speeds
-            self.teams = teams
             self.checked = true
-            if teams.isEmpty {
-                if !self.signingTeam.isEmpty && !Self.isValidTeamID(self.signingTeam) {
-                    self.signingTeam = ""
-                }
-            } else if !teams.contains(where: { $0.id == self.signingTeam }) {
-                self.signingTeam = teams[0].id
-            }
+            self.applyTeams(teams)
         }
     }
 
-    nonisolated private static func isValidTeamID(_ id: String) -> Bool {
-        id.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil
+    private func applyAppleTVs(_ listed: [AppleDevice], sdkReady: Bool) {
+        appleTVs = listed
+        tvOSSDKReady = sdkReady
+        appleTVsChecked = true
+        if !listed.contains(where: { $0.id == appleTVDevice }), let first = listed.first {
+            appleTVDevice = first.id
+        }
+    }
+
+    @discardableResult package func refreshAppleTVs() -> Task<Void, Never> {
+        appleTVGeneration &+= 1
+        let generation = appleTVGeneration
+        let xcrun = xcrun, list = appleTVLookup.list, probe = appleTVLookup.probeSDK, teamsOf = readTeams, needsTeams = teams.isEmpty
+        let lookup = Task.detached(priority: .userInitiated) { (list(xcrun), probe(xcrun), needsTeams ? teamsOf() : nil) }
+        let refresh = Task { @MainActor in
+            let (listed, sdkReady, teams) = await lookup.value
+            guard self.appleTVGeneration == generation else {
+                await self.latestAppleTVRefresh?.value
+                return
+            }
+            self.applyAppleTVs(listed, sdkReady: sdkReady)
+            if let teams { self.applyTeams(teams) }
+        }
+        latestAppleTVRefresh = refresh
+        return refresh
     }
 
     // MARK: The copy flow

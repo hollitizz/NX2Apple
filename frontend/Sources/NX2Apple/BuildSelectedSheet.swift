@@ -18,6 +18,7 @@ struct BuildSelectedSheet: View {
     /// The selected engine makes Mac apps only (nxkit, MacNativeGames): its note. The sheet then builds for the Mac only and offers
     /// no iPhone or iPad target. nil for an engine that builds both.
     var macOnlyNoteKey: String? = nil
+    var queueBlock: String? = nil
     /// Whether the launcher currently has MacNativeGames selected as the active build engine.
     var macNativeGamesSelected: Bool = false
     /// Whether the installed MacNativeGames checkout supports generic Switch 2 `.nup` routing (`tools/nup_input.py`).
@@ -52,7 +53,7 @@ struct BuildSelectedSheet: View {
         ).isEmpty
     }
     private func available(_ game: LibraryGame) -> Bool { targets.contains { queue.canEnqueue(game.titleID, target: $0) } }
-    private var canAdd: Bool { candidates.contains { checked.contains($0.id) && available($0) } }
+    private var canAdd: Bool { queueBlock == nil && candidates.contains { checked.contains($0.id) && available($0) } }
     private var sourceGames: [LibraryGame] { library.games.filter { $0.inputs[GameLibrary.folderInput] != nil || !($0.inputs["base"] ?? []).isEmpty } }
 
     private var iconLoadKey: String {
@@ -86,6 +87,10 @@ struct BuildSelectedSheet: View {
             }
             if let macOnlyNoteKey {
                 Text(loc.t(macOnlyNoteKey)).font(DS.Font.callout).foregroundStyle(DS.Color.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let queueBlock {
+                Text(queueBlock).font(DS.Font.callout).foregroundStyle(LauncherPalette.building)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if effectiveUpstream == .macNativeGames {
@@ -164,7 +169,7 @@ struct BuildSelectedSheet: View {
             }
         }
         .onAppear {
-            selectedTarget = macOnlyNoteKey == nil ? target : BuildTarget.mac
+            selectedTarget = macOnlyNoteKey == nil ? BuildTarget.normalized(target) : BuildTarget.mac
             focus.scope = "batch"
             focus.focused = candidates.first(where: available).map { "batch.game." + $0.id.uuidString } ?? "batch.cancel"
         }

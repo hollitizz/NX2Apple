@@ -19,6 +19,9 @@ extension BuildStore {
         switch place {
         case .target:
             if runningTarget == BuildTarget.mac { destination = .thisMac }
+            else if runningTarget == BuildTarget.tvos {
+                if !devices.appleTVDevice.isEmpty { destination = .device(devices.deviceName(devices.appleTVDevice)) }
+            }
             else if !devices.installDevice.isEmpty { destination = .device(devices.deviceName(devices.installDevice)) }
         case .device(let name):
             if !name.isEmpty { destination = .device(name) }
@@ -184,6 +187,24 @@ extension BuildStore {
         startBuild()
     }
 
+    func applyQueuedTarget(_ queued: String) {
+        let keepsAppleTV = BuildTarget.saved(defaults) == BuildTarget.tvos
+        target = queued
+        guard keepsAppleTV else { return }
+        defaults.set(BuildTarget.tvos, forKey: Self.targetKey)
+        if queued != BuildTarget.tvos { borrowedTarget = queued }
+    }
+
+    func restoreAppleTVTargetWhenIdle() {
+        guard let borrowed = borrowedTarget, !running, queue?.active != true else { return }
+        borrowedTarget = nil
+        if target == borrowed { target = BuildTarget.tvos }
+    }
+
+    func scheduleAppleTVTargetRestore() {
+        DispatchQueue.main.async { [weak self] in self?.restoreAppleTVTargetWhenIdle() }
+    }
+
     /// Starts the entry's build. nil: it runs. A string: why it could not start, which the queue shows on the entry.
     package func startQueued(_ entry: QueueEntry) -> String? {
         guard !running else { return t("queue.cannotStart") }
@@ -245,7 +266,7 @@ extension BuildStore {
         if !entry.outputDirectory.isEmpty {
             outDir = entry.outputDirectory
         }
-        target = normalizedTarget
+        applyQueuedTarget(normalizedTarget)
         let standaloneIOS = normalizedTarget != BuildTarget.mac && targetUpstream.buildsIOSStandaloneOnly
         if standaloneIOS {
             queuedExportIPA = true

@@ -136,6 +136,7 @@ struct BuildPage: View {
                     if queue.hasIOS && !build.skipsQueuedIOS { InstallCard(devices: devices, build: build, showLocked: showRunningSetup, forQueue: true) }
                 } else {
                     InstallCard(devices: devices, build: build, showLocked: showRunningSetup)
+                    AppleTVCard(devices: devices, build: build, showLocked: showRunningSetup)
                 }
             }
             if !stagingQueue {
@@ -164,6 +165,7 @@ struct BuildPage: View {
             }
         }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: completionActive)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: build.target)
         .sheet(isPresented: allStepsOpen, onDismiss: { pad.scope = "main"; if pad.visible { pad.focused = "set.build.steps" } }) {
             BuildProcessStepsSheet(build: build) { allStepsOpen.wrappedValue = false; pad.scope = "main" }
                 .environmentObject(loc).environmentObject(pad)

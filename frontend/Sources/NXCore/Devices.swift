@@ -50,21 +50,26 @@ package struct XcodeTeam: Equatable {
     package let free: Bool
 }
 
+package enum DevicePlatform: String {
+    case iOS
+    case tvOS
+}
+
 /// Xcode's own tools for devices and signing: `xcrun devicectl` and `security`. Nothing here signs or installs;
 /// it only reads what is paired and what can sign.
 package enum DeviceTools {
     /// The paired physical iPhones and iPads, reachable ones first.
     /// `timeout` ends a listing that hangs (the Saves sheet asks with one), as no devices.
     package static func devices(xcrun: String = "/usr/bin/xcrun", timeout: TimeInterval? = nil,
-                                runner: ProcessRunner = SystemProcessRunner()) -> [AppleDevice] {
+                                runner: ProcessRunner = SystemProcessRunner(), platform: DevicePlatform = .iOS) -> [AppleDevice] {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("nxnative-devices-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: file) }
         guard run(xcrun, ["devicectl", "list", "devices", "--json-output", file.path], timeout: timeout, runner: runner) != nil,
               let data = try? Data(contentsOf: file) else { return [] }
-        return parseDevices(data)
+        return parseDevices(data, platform: platform)
     }
 
-    package static func parseDevices(_ data: Data) -> [AppleDevice] {
+    package static func parseDevices(_ data: Data, platform: DevicePlatform = .iOS) -> [AppleDevice] {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = root["result"] as? [String: Any], let list = result["devices"] as? [[String: Any]] else { return [] }
         let devices: [AppleDevice] = list.compactMap { d in
@@ -80,7 +85,7 @@ package enum DeviceTools {
             let software = new["software"] as? [String: Any] ?? [:]
             let state = new["state"] as? [String: Any] ?? [:]
             // A missing reality is physical: only a device that says "simulated" is left out.
-            guard hardware["reality"] as? String != "simulated", hardware["platform"] as? String == "iOS",
+            guard hardware["reality"] as? String != "simulated", hardware["platform"] as? String == platform.rawValue,
                   connection["pairingState"] as? String == "paired",
                   let udid = hardware["udid"] as? String, !udid.isEmpty else { return nil }
             // osVersionNumber is a string in the old block and {"stringValue": "26.2.1", ...} in `software`.

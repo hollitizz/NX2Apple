@@ -178,7 +178,7 @@ package struct ExportSteps: View {
                                  style: .button, fill: true, leading: true) { devices.installDevice = $0 }
                     .disabled(build.running)
                     .padTarget("set.build.export.device", scope: "main", enabled: !inert && !build.running, activate: { stepDevice(1) }, adjust: stepDevice)
-                RefreshDevicesButton(devices: devices)
+                RefreshDevicesButton(checked: devices.checked) { _ = devices.refresh() }
             }
             HStack(spacing: ExportGrid.gap) {
                 Spacer(minLength: 0)
@@ -362,13 +362,15 @@ package struct ExportSteps: View {
 /// Looks for devices again: an icon button beside the device's dropdown, named for VoiceOver and in its tooltip. While the list is
 /// read it turns into a small spinner. Never as wide as a row's buttons, so it stays a small companion of the dropdown.
 struct RefreshDevicesButton: View {
-    @ObservedObject var devices: DeviceStore
+    let checked: Bool
+    var padID = "set.build.devices.refresh"
+    let refresh: () -> Void
     @EnvironmentObject var loc: Localizer
 
     var body: some View {
-        Button { _ = devices.refresh() } label: {
+        Button { refresh() } label: {
             ZStack {
-                if devices.checked { Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .semibold)) }
+                if checked { Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .semibold)) }
                 else { ProgressView().controlSize(.small).scaleEffect(0.8) }
             }
             .frame(width: 14, height: 18)
@@ -376,7 +378,7 @@ struct RefreshDevicesButton: View {
         .buttonStyle(LauncherSecondaryButtonStyle())
         .environment(\.launcherControlWidth, nil)
         .help(loc.t("dev.refresh")).accessibilityLabel(loc.t("dev.refresh"))
-        .padTarget("set.build.devices.refresh", scope: "main", enabled: devices.checked) { _ = devices.refresh() }
+        .padTarget(padID, scope: "main", enabled: checked) { refresh() }
     }
 }
 

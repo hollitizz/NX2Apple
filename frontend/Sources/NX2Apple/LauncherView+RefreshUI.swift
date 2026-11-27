@@ -220,6 +220,10 @@ extension LauncherView {
     }
 
     func enqueueSingleGameRefresh(_ game: LibraryGame, assessment: GameRefreshAssessment?, externalIOSImgPath: String?) {
+        if let blocked = m.appleTVQueueBlock {
+            m.note(blocked)
+            return
+        }
         let ordered = RefreshQueueBuilder.singleGameEntries(
             for: game,
             assessment: assessment,

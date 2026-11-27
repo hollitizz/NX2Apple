@@ -38,8 +38,9 @@ extension BuildStore {
             done = false
             return
         }
+        if deferredForAppleTVCheck() { return }
         // The shared app needs a device this Mac knows. Found out here, before an hour of building, not after it.
-        if target != BuildTarget.mac, !isS2ArmSelected, !isNxkitSelected, !shellDeviceChecked, !exportsShell {
+        if target == BuildTarget.ios, !isS2ArmSelected, !isNxkitSelected, !shellDeviceChecked, !exportsShell {
             guard installsDirectly else {
                 fastRefreshExternalImgPath = nil
                 doneNote = t("shell.needsDevice")
@@ -52,7 +53,7 @@ extension BuildStore {
         shellDeviceChecked = false
         let skipStale = skipStaleCheckForQueuedEntry
         skipStaleCheckForQueuedEntry = false
-        if target != BuildTarget.mac, !isS2ArmSelected, !isNxkitSelected, !exportsOneGame, !exportsFramework, !skipStale, askAboutStaleFrameworks() {
+        if target == BuildTarget.ios, !isS2ArmSelected, !isNxkitSelected, !exportsOneGame, !exportsFramework, !skipStale, askAboutStaleFrameworks() {
             fastRefreshExternalImgPath = nil
             return
         }   // StaleFrameworksPrompt.swift (#449)
@@ -219,7 +220,7 @@ extension BuildStore {
         }
         // The shared app's own folder is decided before the long steps too: one on a read-only volume (a saved
         // /NX2Apple-shell, a DMG chosen as Save to) failed at the last step after the whole build (#492).
-        if target != BuildTarget.mac, !exportsOneGame, !exportsFramework, let why = shellRootProblem() {
+        if target == BuildTarget.ios, !exportsOneGame, !exportsFramework, let why = shellRootProblem() {
             fail(why)
             return
         }
@@ -352,7 +353,7 @@ extension BuildStore {
             if RepoLayout.supportsFallbackIcon(capabilityDir) { args += macFallbackIconArguments(tidHex) }
         } else {
             // Only the game's framework: the one shared app is made and signed after the script (installShell)
-            args += ShellInstall.buildArguments(workDir: workDir, team: exportsShell ? "" : devices.signingTeam)
+            args += deviceScriptArguments(workDir: workDir)
         }
         if !macApp, RepoLayout.supportsCheatDir(capabilityDir),
            let activeCheatsDir = RepoLayout.existingCheatsDir(titleID: gameTitleID ?? tidHex, home: self.home) {
@@ -386,6 +387,7 @@ extension BuildStore {
             }
         }
         if !oneGameIPAPath.isEmpty { denv.merge(OneGameIPA.environment) { $1 } }
+        denv.merge(appleTVEnvironment) { $1 }
 
         if needsAsyncManagedNszInstall {
             let gen = archiveGeneration
@@ -533,6 +535,8 @@ extension BuildStore {
                     if !self.oneGameIPAPath.isEmpty {
                         self.fastRefreshExternalImgPath = nil
                         self.finishOneGameIPA()
+                    } else if self.runningTarget == BuildTarget.tvos {
+                        self.finishAppleTVScript()
                     } else {
                         // The game's archive, then its framework into the one shared app on the device
                         // The framework the build wrote, and the title ID in its name: the script names it after the game

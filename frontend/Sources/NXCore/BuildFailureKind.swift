@@ -29,6 +29,7 @@ package enum BuildFailureKind: String, CaseIterable {
     case volumeFormat
     /// The shared app's install: a device this Mac never paired, and game data that went over only in part.
     case devicePairing, developerMode, shellDataIncomplete
+    case appleTVSigning
     /// The engine's online sync (tools/engine.py sync, EngineLayout.swift): no network or GitHub unreachable, or any other stop of it.
     case engineOffline, engineSync
     /// nxkit (Beta), LNPANDY/NX2Apple#1460: `nxb build` stopped. `detail` is its exit code, `lines` its last lines. There is no fallback to the script.

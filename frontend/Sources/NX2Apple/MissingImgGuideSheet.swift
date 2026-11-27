@@ -506,6 +506,10 @@ extension View {
     editingBuildResult: Binding<Bool>,
     buildStep: Binding<Int>
 ) {
+    if let blocked = stores.build.appleTVQueueBlock {
+        stores.build.note(blocked)
+        return
+    }
     let game = context.game
     let assessment = context.assessment
     let batch = UUID()
