@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hollitizz <valentin.caure@epitech.eu>
+Date: Fri, 27 Nov 2026 18:32:25 +0100
+Subject: [PATCH] ios/tvos: ask the TV for 60 Hz while a game runs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+An Apple TV set to a 50 Hz format (common in Europe) ran the game at 50 frames a second. Players that
+take one movie picture per game frame then showed a 60-picture movie at 5/6 of its speed: on Super
+Mario Galaxy the opening movie took 12 s for 10 s of pictures and its sound broke up, on HDMI and
+Bluetooth alike, while the audio output itself had no underruns.
+
+The game view asks tvOS for 60 Hz through the window's AVDisplayManager (AVDisplayCriteria, tvOS 17)
+once it has a window. tvOS applies it when Match Content > Match Frame Rate is on; when it is off and
+the TV runs at a rate that is not a multiple of 60, the log says so in red, with the setting to change.
+The screen rate is read again when the mode switch ends. Measured on an Apple TV 4K: 50 Hz → 60 Hz at
+launch, the movie's sound clean.
+
+Upstream-Status: fork-only
+Reason: the Apple TV build is fork-only, and a 50 Hz TV format slows every game's movies to 5/6 of their speed
+Issue: LNPANDY/NX2Apple#85
+---
+ dm/ios/Sources/front_ios.m | 32 ++++++++++++++++++++++++++++++--
+ dm/ios/project_tv.yml      |  2 ++
+ 2 files changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index 3f11e99..f3c5fea 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -7,6 +7,10 @@
+ #import <QuartzCore/CAMetalLayer.h>
+ #import <Metal/Metal.h>
+ #import <AVFAudio/AVFAudio.h>
++#if TARGET_OS_TV
++#import <AVKit/AVKit.h>
++#import <CoreMedia/CoreMedia.h>
++#endif
+ #include <errno.h>
+ #include <dlfcn.h>
+ #include <stdatomic.h>   // g_screen_hz: read on the main thread, used from the render thread (front_screen_max_fps)
+@@ -46,6 +50,21 @@
+ static void screen_refresh(void);
+ static void front_ios_audio_watch(void);
+ static UILabel *front_ios_fps_label(void);
++#if TARGET_OS_TV
++#define TV_GAME_HZ 60
++static void tv_ask_for_game_rate(UIWindow *window) {
++    static int asked;
++    if (asked || !window) return;
++    asked = 1;
++    AVDisplayManager *manager = window.avDisplayManager;
++    CMVideoFormatDescriptionRef format = NULL;
++    CMVideoFormatDescriptionCreate(kCFAllocatorDefault, kCMVideoCodecType_HEVC, 1920, 1080, NULL, &format);
++    if (format) { manager.preferredDisplayCriteria = [[AVDisplayCriteria alloc] initWithRefreshRate:TV_GAME_HZ formatDescription:format]; CFRelease(format); }
++    int hz = (int)window.screen.maximumFramesPerSecond;
++    if (manager.displayCriteriaMatchingEnabled) LOG("front end: TV at %d Hz, %d Hz asked of tvOS (Match Content)", hz, TV_GAME_HZ);
++    else if (hz % TV_GAME_HZ) LOG("[RED] front end: TV at %d Hz and Match Content > Match Frame Rate is off: movies play at %d/%d of their speed and their sound breaks up; set Video and Audio > Format to 60 Hz or turn Match Frame Rate on", hz, hz, TV_GAME_HZ);
++}
++#endif
+ 
+ @interface DmGameView : UIView
+ @property (nonatomic) CGFloat maxPixelWidth;   // 0: the screen's own pixels; a TV caps the drawable at 1920 across (tv_attach)
+@@ -64,7 +83,12 @@ - (instancetype)initWithFrame:(CGRect)f {
+     }
+     return self;
+ }
+-- (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; screen_refresh(); }   // the phone's screen or a TV's (DmTVSceneDelegate)
++- (void)didMoveToWindow {
++    [super didMoveToWindow]; [self setNeedsLayout]; screen_refresh();
++#if TARGET_OS_TV
++    tv_ask_for_game_rate(self.window);
++#endif
++}   // the phone's screen or a TV's (DmTVSceneDelegate)
+ - (void)layoutSubviews {   // render at the pixels of the screen the view is on (an iPad window can move to another), at most maxPixelWidth across
+     [super layoutSubviews];
+     CAMetalLayer *l = (CAMetalLayer *)self.layer;
+@@ -436,7 +460,7 @@ - (void)sceneDidDisconnect:(UIScene *)s { if (g_tv == self.window) tv_detach();
+ // Thermal state and screen brightness for the power and present rows every 300 frames (hle_nvn.c; its weak defaults return -1 on the Mac). thermalState: 0 nominal, 1 fair, 2 serious, 3 critical.
+ // Brightness is read on the main thread at start and on each change; every change of the thermal state and of Low Power Mode (which lowers the CPU clock) is logged with the time since launch
+ static _Atomic double g_brightness = -1;
+-static id g_obs[7];   // the notification observers front_ios_teardown removes
++static id g_obs[8];   // the notification observers front_ios_teardown removes
+ static NSTimer *g_fps_timer;
+ int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
+ int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
+@@ -451,6 +475,10 @@ static void front_ios_power_watch(void) {
+     g_obs[2] = [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+         (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); screen_refresh(); }];
+     g_obs[5] = [NSNotificationCenter.defaultCenter addObserverForName:UIScreenModeDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; screen_refresh(); }];
++#if TARGET_OS_TV
++    g_obs[7] = [NSNotificationCenter.defaultCenter addObserverForName:AVDisplayManagerModeSwitchEndNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
++        (void)n; screen_refresh(); LOG("front end: TV mode switch done, screen %d Hz", front_screen_max_fps()); }];
++#endif
+     screen_refresh();
+     LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s, screen %d Hz", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off", front_screen_max_fps());
+ }
+diff --git a/dm/ios/project_tv.yml b/dm/ios/project_tv.yml
+index 6ff54a9..afe675f 100644
+--- a/dm/ios/project_tv.yml
++++ b/dm/ios/project_tv.yml
+@@ -26,6 +26,8 @@ targets:
+         compilerFlags: "-Dmain=dm_main"
+     dependencies:
+       - sdk: libcompression.tbd
++      - sdk: AVKit.framework
++      - sdk: CoreMedia.framework
+     postBuildScripts:
+       - name: Copy game resources
+         script: /bin/bash "${SRCROOT}/tools/stage_resources.sh"
